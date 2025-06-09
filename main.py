@@ -5,14 +5,11 @@ from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
 from typing import Optional
-from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import Runnable, RunnableConfig
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from langgraph.graph import END, StateGraph, START
 from supabase import create_client, Client
-import pytz
 from typing import Literal
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.prebuilt import tools_condition
@@ -25,8 +22,6 @@ from langgraph.prebuilt import ToolNode
 from langchain_neo4j import GraphCypherQAChain, Neo4jGraph
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.prompts.prompt import PromptTemplate
-from typing import Dict, List
-import json
 
 load_dotenv()
 supabase= create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
@@ -366,13 +361,6 @@ def kg_answer(query: str) -> Dict[str, Any]:
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
     cypher_chain, neo4j_graph = setup_cypher_chain()
     symbolic_response = cypher_chain.invoke(query)
-    has_symbolic = (
-        isinstance(symbolic_response, dict)
-        and (
-            (isinstance(symbolic_response.get('result'), list) and symbolic_response.get('result'))
-            or (isinstance(symbolic_response.get('result'), str) and symbolic_response.get('result').strip())
-        )
-    )
 
     query_embedding = embeddings.embed_query(query)
     cypher = (
@@ -455,20 +443,32 @@ from langchain_core.messages import ToolMessage
 def create_entry_node(assistant_name: str, new_dialog_state: str) -> Callable:
     def entry_node(state: State) -> dict:
         messages = []
-        # Only add ToolMessage if the last message has tool_calls
-        last_message = state["messages"][-1]
-        if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
-            tool_call_id = last_message.tool_calls[0]["id"]
+        
+        # For registration agent, always provide clear guidance
+        if new_dialog_state == "registration_agent":
+            from langchain_core.messages import SystemMessage
             messages.append(
-                ToolMessage(
-                    content=f"The assistant is now the {assistant_name}. Reflect on the above conversation between the host assistant and the user."
-                    f" The user's intent is unsatisfied. Use the provided tools to assist the user. Remember, you are {assistant_name},"
-                    " and the booking, update, other other action is not complete until after you have successfully invoked the appropriate tool."
-                    " If the user changes their mind or needs help for other tasks, call the CompleteOrEscalate function to let the primary host assistant take control."
-                    " Do not mention who you are - just act as the proxy for the assistant.",
-                    tool_call_id=tool_call_id,
+                SystemMessage(
+                    content=f"You are now the {assistant_name}. The user has provided their phone number. "
+                    "Check if they are registered using the get_customer tool with the phone number they provided. "
+                    "Follow the registration process step by step as described in your system prompt."
                 )
             )
+        else:
+            # For other agents, use the original logic
+            last_message = state["messages"][-1]
+            if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
+                tool_call_id = last_message.tool_calls[0]["id"]
+                messages.append(
+                    ToolMessage(
+                        content=f"The assistant is now the {assistant_name}. Reflect on the above conversation between the host assistant and the user."
+                        f" The user's intent is unsatisfied. Use the provided tools to assist the user. Remember, you are {assistant_name},"
+                        " and the booking, update, other other action is not complete until after you have successfully invoked the appropriate tool."
+                        " If the user changes their mind or needs help for other tasks, call the CompleteOrEscalate function to let the primary host assistant take control."
+                        " Do not mention who you are - just act as the proxy for the assistant.",
+                        tool_call_id=tool_call_id,
+                    )
+                )
         
         return {
             "messages": messages,
@@ -567,18 +567,15 @@ def route_registration_agent(
     
     route = tools_condition(state)
     if route == END:
-        # print("[DEBUG] Route is END")
-        # Check if registration is complete before ending
-        if state.get("is_registered", False):
-            # print("[DEBUG] User is registered, transitioning to waiter_agent")
-            return "transition_to_waiter"
-        return END
+        # print("[DEBUG] Route is END, transitioning to waiter")
+        # Always transition to waiter after registration is complete
+        return "transition_to_waiter"
     
     tool_calls = state["messages"][-1].tool_calls
     did_cancel = any(tc["name"] == CompleteOrEscalate.__name__ for tc in tool_calls)
     if did_cancel:
-        # print("[DEBUG] CompleteOrEscalate called, leaving skill")
-        return "leave_skill"
+        # print("[DEBUG] CompleteOrEscalate called, transitioning to waiter")
+        return "transition_to_waiter"
     
     safe_toolnames = [t.name for t in registration_agent_tools]
     if all(tc["name"] in safe_toolnames for tc in tool_calls):
@@ -604,16 +601,11 @@ builder.add_edge("registration_tools", "registration_agent")
 builder.add_conditional_edges(
     "registration_agent",
     route_registration_agent,
-    ["registration_tools", "leave_skill", "transition_to_waiter", END],
+    ["registration_tools", "transition_to_waiter"],
 )
 
 
-def waiter_tools_condition(state):
-    # Example: If the agent output says to use a waiter tool
-    if state.get("action") == "use_waiter_tool":
-        return "waiter_tools"
-    # Otherwise, finish the workflow
-    return END
+
 
 
 # Wrap waiter agent with debug logging
@@ -635,8 +627,6 @@ def waiter_agent_with_debug(state: State, config: RunnableConfig):
 
 builder.add_node("waiter_agent", waiter_agent_with_debug)
 builder.add_node("waiter_tools", create_tool_node_with_fallback(waiter_agent_tools))
-
-builder.add_edge("registration_tools", "registration_agent")
 builder.add_conditional_edges(
     "waiter_agent",
     tools_condition,
@@ -646,31 +636,9 @@ builder.add_conditional_edges(
     }
 )
 
-# This node will be shared for exiting all specialized assistants
-def pop_dialog_state(state: State) -> dict:
-    """Pop the dialog stack and return to the main assistant.
 
-    This lets the full graph explicitly track the dialog flow and delegate control
-    to specific sub-graphs.
-    """
-    messages = []
-    if state["messages"][-1].tool_calls:
-        # Note: Doesn't currently handle the edge case where the llm performs parallel tool calls
-        messages.append(
-            ToolMessage(
-                content="Resuming dialog with the host assistant. Please reflect on the past conversation and assist the user as needed.",
-                tool_call_id=state["messages"][-1].tool_calls[0]["id"],
-            )
-        )
-    return {
-        "dialog_state": "pop",
-        "messages": messages,
-    }
 
-builder.add_node("leave_skill", pop_dialog_state)
-builder.add_edge("leave_skill", "waiter_agent")
 
-# builder.add_edge("waiter_agent", "__end__")
 builder.add_edge("waiter_tools", "waiter_agent")
 
 memory = MemorySaver()
@@ -685,7 +653,6 @@ except Exception:
     # This requires some extra dependencies and is optional
     pass
 
-import shutil
 import uuid
 
 thread_id = str(uuid.uuid4())
