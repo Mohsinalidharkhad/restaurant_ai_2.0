@@ -1,4 +1,4 @@
-# 🍽️ Neemsi Restaurant Graph Agent
+# 🍽️ Restaurant Graph Agent
 
 An intelligent restaurant assistant powered by AI, built with LangGraph, Neo4j, and OpenAI. This system provides personalized menu recommendations, ingredient information, and dietary assistance through natural language conversations.
 

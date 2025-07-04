@@ -29,6 +29,7 @@ logging.getLogger("neo4j").setLevel(logging.ERROR)
 # Add new imports for NLP processing
 import re
 from typing import List
+import time  # Add timing import
 
 load_dotenv()
 supabase= create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
@@ -257,24 +258,19 @@ registration_agent_prompt = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            "You are a helpful restaurant registration assistant. You have a persona of an experienced waiter who is very friendly and helpful, so speak like a courteous waiter."
-            "Don't say your are registered with us or not, or I see that you're already in our system, just say based on the past visits here are your preferences, and then ask them if they want to update them."
-            "Your job is to collect the user's phone number, name, food preferences, and allergies or update those details"
-            "\n\nCRITICAL RULE: NEVER CALL ANY TOOLS UNTIL THE USER PROVIDES THEIR PHONE NUMBER"
-            "\n- Do NOT call get_customer tool until you have received a 10-digit phone number from the user"
-            "\n- Do NOT call any other tools until you have the phone number"
-            "\n- Do NOT assume or guess phone numbers"
-            "\n- Do NOT use default or example phone numbers"
-            "\n- ALWAYS wait for the user's response before proceeding to the next step"
-            "\n- If the user asks about menu items, politely ask for their phone number first"
-            "Perform the tasks in the following order:\n"
-            "\n1. FIRST: Ask the user for their 10-digit phone number. Do not ask users if they are registered or not. Simply request the phone number and wait for their response."
-            "\n2. ONLY AFTER receiving the phone number: Use the get_customer tool to check if they are registered."
-            "\n3. If the user is already registered, confirm their preferences (dietary preference: Veg/Non-veg/Vegan, Spice-level: Bland/Less Spicy/Medium Spicy/Spicy, Cuising: North Indian/South Indian/Chinese/Mughlai etc) and allergies (Gluten, Soy, etc) and offer to update them. If they want to update, use create_or_update_customer. If they don't want to update, use mark_registration_complete. After this is done, use CompleteOrEscalate with cancel=True to transfer to the waiter."
-            "\n4. If the user is not registered, ask user for their name first. Once you have the name, offer to collect preferences (dietary, spice level, cuisine) and allergies. If they provide preferences, use create_or_update_customer. If they want to skip preferences or say 'later', use mark_registration_complete with just the name. After registration is complete, use CompleteOrEscalate with cancel=True to transfer to the waiter."
-            "\n5. After collecting minimum required information and doing basic registration, if at any point the user wants to skip setting preferences, says 'later', 'will do that later', 'skip', or asks about menu/food items, use mark_registration_complete and then immediately use CompleteOrEscalate with cancel=True and reason='Registration complete, user ready for menu assistance' However the basic registration using atleast phone number needs to be done (and also name if the user is new)."
-            "Do not answer any menu related questions, just use CompleteOrEscalate to transfer to the waiter."
-            "\n\nIMPORTANT: As soon as you have the minimum required information (phone number and name for new users, or confirmed/updated preferences for existing users), immediately use CompleteOrEscalate to transfer them to the waiter assistant who can help with menu questions."
+            "You are a friendly restaurant waiter helping with customer registration."
+            " Collect phone number, name, preferences, and allergies."
+            
+            "\n\nCRITICAL: NEVER call tools without phone number first!"
+            
+            "\n\nWORKFLOW:"
+            "\n1. Ask for 10-digit phone number (wait for response)"
+            "\n2. Use get_customer tool to check registration"
+            "\n3. Existing customers: Confirm preferences, offer updates, use CompleteOrEscalate"
+            "\n4. New customers: Get name, offer preferences/allergies collection, use CompleteOrEscalate"
+            "\n5. If user wants to skip or asks about menu → mark_registration_complete + CompleteOrEscalate"
+            
+            "\n\nDon't answer menu questions - transfer to waiter immediately after minimum registration."
         ),
         ("placeholder", "{messages}"),
     ]
@@ -309,28 +305,91 @@ def get_dish_detail(dish_id: str) -> Dict[str, Any]:
     # TODO: Implement with Neo4j
     return {"name": "Sample Dish", "ingredients": ["ingredient1", "ingredient2"]}
 
-def setup_cypher_chain():
-    print(f"[DEBUG] Setting up Neo4j connection...")
-    print(f"[DEBUG] NEO4J_URI: {os.getenv('NEO4J_URI')}")
-    print(f"[DEBUG] NEO4J_USER: {os.getenv('NEO4J_USER')}")
+# Add connection pooling and caching
+_neo4j_connection = None
+_cypher_chain = None
+_schema_cache = {}
+_schema_cache_timestamp = 0
+SCHEMA_CACHE_DURATION = 300  # 5 minutes in seconds
+
+def get_neo4j_connection():
+    """Singleton pattern for Neo4j connection - reuse existing connection"""
+    global _neo4j_connection
     
-    neo4j_graph = Neo4jGraph(
+    if _neo4j_connection is None:
+        connection_start = time.time()
+        print(f"[TIMING] Creating new Neo4j connection...")
+        _neo4j_connection = Neo4jGraph(
             url=os.getenv("NEO4J_URI"),
             username=os.getenv("NEO4J_USER"),
             password=os.getenv("NEO4J_PASSWORD"),
             enhanced_schema=True
         )
-    print(f"[DEBUG] Neo4j connection established")
+        connection_end = time.time()
+        print(f"[TIMING] New Neo4j connection created in {connection_end - connection_start:.3f}s")
+        
+        # Test the connection
+        try:
+            latency_start = time.time()
+            _neo4j_connection.query("RETURN 1 as test")
+            latency_end = time.time()
+            print(f"[TIMING] Connection test latency: {latency_end - latency_start:.3f}s")
+        except Exception as e:
+            print(f"[ERROR] Connection test failed: {e}")
+            _neo4j_connection = None
+            raise e
+            
+        # Get database stats once
+        try:
+            node_count_result = _neo4j_connection.query("MATCH (n) RETURN count(n) as node_count")
+            node_count = node_count_result[0]['node_count'] if node_count_result else 0
+            print(f"[DEBUG] Database initialized with {node_count} nodes")
+        except Exception as e:
+            print(f"[DEBUG] Database stats check failed: {e}")
+    else:
+        print(f"[TIMING] Reusing existing Neo4j connection (connection pooling active)")
     
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-    
-    print(f"[DEBUG] Refreshing schema...")
-    neo4j_graph.refresh_schema()
-    print(f"[DEBUG] Schema refreshed. Schema content: {neo4j_graph.schema}")
+    return _neo4j_connection
 
+def get_cypher_chain():
+    """Singleton pattern for Cypher chain - reuse existing chain and schema"""
+    global _cypher_chain, _schema_cache, _schema_cache_timestamp
     
-    CYPHER_GENERATION_TEMPLATE = """Task: Generate Cypher statement to query a graph database.
+    if _cypher_chain is None:
+        chain_setup_start = time.time()
+        print(f"[TIMING] Creating new Cypher chain...")
+        
+        # Get connection (will reuse if available)
+        neo4j_graph = get_neo4j_connection()
+        
+        # LLM setup (lightweight)
+        llm_start = time.time()
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        llm_end = time.time()
+        print(f"[TIMING] LLM setup in {llm_end - llm_start:.3f}s")
+        
+        # Schema handling with persistent caching
+        current_time = time.time()
+        
+        if _schema_cache and (current_time - _schema_cache_timestamp) < SCHEMA_CACHE_DURATION:
+            print(f"[DEBUG] Using cached schema (age: {current_time - _schema_cache_timestamp:.1f}s)")
+            neo4j_graph.schema = _schema_cache.get('schema', '')
+            schema_time = 0.0
+        else:
+            print(f"[DEBUG] Refreshing schema...")
+            schema_start = time.time()
+            neo4j_graph.refresh_schema()
+            schema_end = time.time()
+            schema_time = schema_end - schema_start
+            print(f"[TIMING] Schema refresh took {schema_time:.3f}s")
+            
+            # Cache the schema persistently
+            _schema_cache = {'schema': neo4j_graph.schema}
+            _schema_cache_timestamp = current_time
+            print(f"[DEBUG] Schema cached for future use")
+        
+        # Create the chain
+        CYPHER_GENERATION_TEMPLATE = """Task: Generate Cypher statement to query a graph database.
 Instructions:
 Use only the provided relationship types and properties in the schema.
 Do not use any other relationship types and properties that are not provided.
@@ -375,33 +434,103 @@ MATCH (d:Dish {{ name : 'Dal Makhani'}})-[:CONTAINS]->(i:Ingredient)  RETURN d.n
 The question is:
 {query}"""
 
-    cypher_prompt = PromptTemplate(
-        input_variables=["schema", "query"], 
-        template=CYPHER_GENERATION_TEMPLATE
-    )
+        cypher_prompt = PromptTemplate(
+            input_variables=["schema", "query"], 
+            template=CYPHER_GENERATION_TEMPLATE
+        )
 
-    print(f"[DEBUG] Creating GraphCypherQAChain...")
-    try:
-        cypher_chain = GraphCypherQAChain.from_llm(
+        chain_create_start = time.time()
+        _cypher_chain = GraphCypherQAChain.from_llm(
             llm,
             graph=neo4j_graph,
             verbose=True,
             validate_cypher=True,
             cypher_prompt=cypher_prompt,
-            return_direct=True,  # Return raw results directly to avoid LLM processing issues
+            return_direct=True,
             top_k=20,
-            input_key="query",  # Added input_key
+            input_key="query",
             allow_dangerous_requests=True,
         )
-        print(f"[DEBUG] GraphCypherQAChain created successfully")
-    except Exception as e:
-        print(f"[DEBUG] Error creating GraphCypherQAChain: {e}")
-        raise e
+        chain_create_end = time.time()
+        print(f"[TIMING] Cypher chain creation took {chain_create_end - chain_create_start:.3f}s")
+        
+        chain_setup_end = time.time()
+        print(f"[TIMING] Total new Cypher chain setup took {chain_setup_end - chain_setup_start:.3f}s")
+    else:
+        print(f"[TIMING] Reusing existing Cypher chain (chain pooling active)")
+    
+    return _cypher_chain, get_neo4j_connection()
+
+def setup_cypher_chain():
+    """Legacy function - now uses connection pooling"""
+    setup_start = time.time()
+    print(f"[TIMING] setup_cypher_chain started (with pooling)")
+    
+    cypher_chain, neo4j_graph = get_cypher_chain()
+    
+    setup_end = time.time()
+    print(f"[TIMING] setup_cypher_chain completed in {setup_end - setup_start:.3f}s")
     
     return cypher_chain, neo4j_graph
 
+# Add embedding model pooling and query caching
+_embedding_model = None
+_query_cache = {}
+_query_cache_timestamps = {}
+QUERY_CACHE_DURATION = 180  # 3 minutes for query results
+
+def get_embedding_model():
+    """Singleton pattern for embedding model - expensive to create"""
+    global _embedding_model
+    
+    if _embedding_model is None:
+        embed_start = time.time()
+        print(f"[TIMING] Creating new embedding model...")
+        _embedding_model = OpenAIEmbeddings(model="text-embedding-3-small")
+        embed_end = time.time()
+        print(f"[TIMING] New embedding model created in {embed_end - embed_start:.3f}s")
+    else:
+        print(f"[TIMING] Reusing existing embedding model (pooling active)")
+    
+    return _embedding_model
+
+def get_cached_query_result(query_key):
+    """Get cached query result if available and recent"""
+    global _query_cache, _query_cache_timestamps
+    
+    current_time = time.time()
+    
+    if query_key in _query_cache:
+        cache_age = current_time - _query_cache_timestamps.get(query_key, 0)
+        if cache_age < QUERY_CACHE_DURATION:
+            print(f"[TIMING] Using cached query result (age: {cache_age:.1f}s)")
+            return _query_cache[query_key]
+        else:
+            # Remove stale cache entry
+            del _query_cache[query_key]
+            del _query_cache_timestamps[query_key]
+    
+    return None
+
+def cache_query_result(query_key, result):
+    """Cache query result for future use"""
+    global _query_cache, _query_cache_timestamps
+    
+    _query_cache[query_key] = result
+    _query_cache_timestamps[query_key] = time.time()
+    print(f"[DEBUG] Cached query result for key: {query_key[:50]}...")
+
 def kg_answer(query: str) -> Dict[str, Any]:
-    print(f"[DEBUG] kg_answer called with query: {query}")
+    kg_start = time.time()
+    print(f"[TIMING] kg_answer started for query: {query}")
+    
+    # Check cache first
+    query_cache_key = f"kg_{query.lower().strip()}"
+    cached_result = get_cached_query_result(query_cache_key)
+    if cached_result:
+        kg_end = time.time()
+        print(f"[TIMING] kg_answer served from cache in {kg_end - kg_start:.3f}s")
+        return cached_result
     
     cypher_chain = None
     neo4j_graph = None
@@ -409,19 +538,20 @@ def kg_answer(query: str) -> Dict[str, Any]:
     vector_result = "No semantic answer available"
     
     try:
-        cypher_chain, neo4j_graph = setup_cypher_chain()
-        print(f"[DEBUG] Cypher chain setup complete")
-        
-        # Print the schema to debug
-        schema = neo4j_graph.schema
-        print(f"[DEBUG] Neo4j Schema: {schema}")
+        setup_start = time.time()
+        cypher_chain, neo4j_graph = get_cypher_chain()  # Now uses pooling
+        setup_end = time.time()
+        print(f"[TIMING] Cypher chain setup took {setup_end - setup_start:.3f}s")
         
         print(f"[DEBUG] Invoking cypher chain...")
+        cypher_start = time.time()
         # Pass both schema and query as the prompt template expects both
         symbolic_response = cypher_chain.invoke({
             "schema": neo4j_graph.schema,
             "query": query
         })
+        cypher_end = time.time()
+        print(f"[TIMING] Cypher chain invoke took {cypher_end - cypher_start:.3f}s")
         
         # Handle both direct results and dict format
         if isinstance(symbolic_response, dict) and 'result' in symbolic_response:
@@ -455,7 +585,10 @@ def kg_answer(query: str) -> Dict[str, Any]:
                 RETURN d.name, d.description, d.price, d.prepTimeMin, d.isSignature, d.vegClass
                 LIMIT 10
                 """
+                fallback_start = time.time()
                 symbolic_response = neo4j_graph.query(direct_cypher)
+                fallback_end = time.time()
+                print(f"[TIMING] Direct fallback query took {fallback_end - fallback_start:.3f}s")
                 print(f"[DEBUG] Direct query result: {symbolic_response}")
             except Exception as direct_e:
                 print(f"[DEBUG] Direct query also failed: {direct_e}")
@@ -466,8 +599,18 @@ def kg_answer(query: str) -> Dict[str, Any]:
     # Handle semantic search with unified embedding index
     if neo4j_graph:
         try:
-            embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+            vector_start = time.time()
+            print(f"[TIMING] Starting vector search...")
+            
+            embeddings_init_start = time.time()
+            embeddings = get_embedding_model()  # Now uses pooling
+            embeddings_init_end = time.time()
+            print(f"[TIMING] Embeddings initialization took {embeddings_init_end - embeddings_init_start:.3f}s")
+            
+            embedding_start = time.time()
             query_embedding = embeddings.embed_query(query)
+            embedding_end = time.time()
+            print(f"[TIMING] Query embedding generation took {embedding_end - embedding_start:.3f}s")
             
             # Use unified menu_embed index for semantic search
             unified_cypher = """
@@ -498,8 +641,12 @@ def kg_answer(query: str) -> Dict[str, Any]:
             ORDER BY score DESC
             """
             
+            vector_query_start = time.time()
             vector_result = neo4j_graph.query(unified_cypher, params={"embedding": query_embedding, "k": 15})
+            vector_query_end = time.time()
+            print(f"[TIMING] Vector query execution took {vector_query_end - vector_query_start:.3f}s")
             
+            processing_start = time.time()
             # Remove duplicates and sort by score
             unique_results = {}
             for item in vector_result:
@@ -508,17 +655,30 @@ def kg_answer(query: str) -> Dict[str, Any]:
                     unique_results[dish_name] = item
             
             vector_result = sorted(unique_results.values(), key=lambda x: x['score'], reverse=True)[:10]
+            processing_end = time.time()
+            print(f"[TIMING] Vector result processing took {processing_end - processing_start:.3f}s")
+            
+            vector_end = time.time()
+            print(f"[TIMING] Total vector search took {vector_end - vector_start:.3f}s")
             print(f"[DEBUG] Vector result using unified embedding: {len(vector_result)} matches")
             
         except Exception as e:
             print(f"[DEBUG] Error in semantic query: {e}")
             vector_result = f"Error in semantic search: {e}"
 
-    return {
+    result = {
         "symbolic_answer": symbolic_response,
         "semantic_answer": vector_result,
         "formatted": f"SYMBOLIC ANSWER:\n{symbolic_response}\n\nSEMANTIC ANSWER:\n{vector_result}"
     }
+    
+    # Cache the result
+    cache_query_result(query_cache_key, result)
+    
+    kg_end = time.time()
+    print(f"[TIMING] Total kg_answer took {kg_end - kg_start:.3f}s")
+
+    return result
 
 
 @tool
@@ -532,10 +692,14 @@ def extract_food_terms(query: str) -> Dict[str, Any]:
     Returns:
         Dict with extracted terms categorized for efficient unified index search
     """
-    print(f"[DEBUG] extract_food_terms called with query: {query}")
+    extract_start = time.time()
+    print(f"[TIMING] extract_food_terms started with query: {query}")
     
     try:
+        llm_init_start = time.time()
         llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        llm_init_end = time.time()
+        print(f"[TIMING] LLM initialization took {llm_init_end - llm_init_start:.3f}s")
         
         extraction_prompt = f"""
         Analyze this restaurant customer query and extract food-related terms for semantic search.
@@ -573,11 +737,15 @@ Example for "creamy paneer items":
         
         """
         
+        llm_call_start = time.time()
         response = llm.invoke(extraction_prompt)
+        llm_call_end = time.time()
+        print(f"[TIMING] LLM extraction call took {llm_call_end - llm_call_start:.3f}s")
         
         # Parse JSON response with improved error handling
         import json
         try:
+            parsing_start = time.time()
             content = response.content.strip()
             print(f"[DEBUG] Raw LLM response: {content[:200]}...")
             
@@ -596,7 +764,12 @@ Example for "creamy paneer items":
                     content = content[start:end]
             
             extracted_data = json.loads(content)
+            parsing_end = time.time()
+            print(f"[TIMING] JSON parsing took {parsing_end - parsing_start:.3f}s")
             print(f"[DEBUG] LLM extracted terms: {extracted_data}")
+            
+            extract_end = time.time()
+            print(f"[TIMING] Total extract_food_terms took {extract_end - extract_start:.3f}s")
             
             return {
                 "success": True,
@@ -609,6 +782,7 @@ Example for "creamy paneer items":
             print(f"[DEBUG] JSON parsing failed: {e}, content: {content[:100]}")
             
             # Enhanced fallback extraction
+            fallback_start = time.time()
             words = query.lower().replace(',', ' ').replace('please', '').split()
             food_terms = [word for word in words if len(word) > 2 and word not in ['have', 'what', 'show', 'tell', 'menu', 'dish', 'food', 'items', 'please']]
             
@@ -640,7 +814,12 @@ Example for "creamy paneer items":
                     # Put unknown terms in ingredients as they're most likely to match
                     fallback_data["ingredients"].append(term)
             
+            fallback_end = time.time()
+            print(f"[TIMING] Fallback extraction took {fallback_end - fallback_start:.3f}s")
             print(f"[DEBUG] Fallback extraction: {fallback_data}")
+            
+            extract_end = time.time()
+            print(f"[TIMING] Total extract_food_terms (with fallback) took {extract_end - extract_start:.3f}s")
             
             return {
                 "success": False,
@@ -651,6 +830,8 @@ Example for "creamy paneer items":
             }
             
     except Exception as e:
+        extract_end = time.time()
+        print(f"[TIMING] extract_food_terms failed after {extract_end - extract_start:.3f}s")
         print(f"[DEBUG] Error in extract_food_terms: {e}")
         return {
             "success": False,
@@ -666,17 +847,22 @@ def debug_embedding_indexes() -> Dict[str, Any]:
     Check if the unified embedding vector index exists in Neo4j.
     Use this to debug why embedding searches might be failing.
     """
+    debug_start = time.time()
+    print(f"[TIMING] debug_embedding_indexes started")
+    
     try:
-        neo4j_graph = Neo4jGraph(
-            url=os.getenv("NEO4J_URI"),
-            username=os.getenv("NEO4J_USER"),
-            password=os.getenv("NEO4J_PASSWORD"),
-            enhanced_schema=True
-        )
+        # Use pooled Neo4j connection
+        connection_start = time.time()
+        neo4j_graph = get_neo4j_connection()  # Now uses pooling
+        connection_end = time.time()
+        print(f"[TIMING] Neo4j connection for debug took {connection_end - connection_start:.3f}s")
         
         # Check for vector indexes
+        index_check_start = time.time()
         index_check_query = "SHOW INDEXES"
         indexes = neo4j_graph.query(index_check_query)
+        index_check_end = time.time()
+        print(f"[TIMING] Index check query took {index_check_end - index_check_start:.3f}s")
         
         vector_indexes = [idx for idx in indexes if 'vector' in str(idx).lower()]
         
@@ -691,17 +877,26 @@ def debug_embedding_indexes() -> Dict[str, Any]:
         for label in searchable_labels:
             count_query = f"MATCH (n:{label}:Searchable) WHERE n.embedding IS NOT NULL RETURN count(n) as count"
             try:
+                count_start = time.time()
                 result = neo4j_graph.query(count_query)
+                count_end = time.time()
+                print(f"[TIMING] Embedding count for {label} took {count_end - count_start:.3f}s")
                 embedding_counts[f"{label}_with_embeddings"] = result[0]['count'] if result else 0
             except Exception as e:
                 embedding_counts[f"{label}_with_embeddings"] = f"Error: {e}"
         
         # Check total searchable nodes
         try:
+            total_start = time.time()
             total_searchable = neo4j_graph.query("MATCH (n:Searchable) RETURN count(n) as count")
+            total_end = time.time()
+            print(f"[TIMING] Total searchable count took {total_end - total_start:.3f}s")
             total_count = total_searchable[0]['count'] if total_searchable else 0
         except Exception as e:
             total_count = f"Error: {e}"
+        
+        debug_end = time.time()
+        print(f"[TIMING] Total debug_embedding_indexes took {debug_end - debug_start:.3f}s")
         
         return {
             "success": True,
@@ -716,10 +911,164 @@ def debug_embedding_indexes() -> Dict[str, Any]:
         }
         
     except Exception as e:
+        debug_end = time.time()
+        print(f"[TIMING] debug_embedding_indexes failed after {debug_end - debug_start:.3f}s")
         return {
             "success": False,
             "error": str(e),
             "summary": "Failed to check indexes"
+        }
+
+@tool
+def get_faq_answer(query: str) -> Dict[str, Any]:
+    """
+    Search FAQ database for answers to general restaurant questions about hours, location, 
+    parking, policies, services, etc. Use this for non-menu related questions.
+    
+    Args:
+        query: User's question about restaurant information
+        
+    Returns:
+        Dict with FAQ answers and confidence scores
+    """
+    faq_start = time.time()
+    print(f"[TIMING] get_faq_answer started with query: {query}")
+    
+    try:
+        # Use pooled Neo4j connection
+        connection_start = time.time()
+        neo4j_graph = get_neo4j_connection()
+        connection_end = time.time()
+        print(f"[TIMING] Neo4j connection for FAQ search took {connection_end - connection_start:.3f}s")
+        
+        # Use pooled embedding model
+        embeddings_start = time.time()
+        embeddings = get_embedding_model()
+        embeddings_end = time.time()
+        print(f"[TIMING] Embedding model for FAQ took {embeddings_end - embeddings_start:.3f}s")
+        
+        # Generate query embedding
+        embed_start = time.time()
+        query_embedding = embeddings.embed_query(query)
+        embed_end = time.time()
+        print(f"[TIMING] FAQ query embedding took {embed_end - embed_start:.3f}s")
+        
+        # Search FAQ vector index
+        faq_search_query = """
+        WITH $embedding AS queryEmbedding
+        CALL db.index.vector.queryNodes('faq_embed', $k, queryEmbedding)
+        YIELD node, score
+        WHERE score > 0.7
+        WITH node AS faq, score
+        RETURN faq.question as question,
+               faq.answer as answer,
+               faq.id as id,
+               score
+        ORDER BY score DESC
+        """
+        
+        search_start = time.time()
+        results = neo4j_graph.query(faq_search_query, params={"embedding": query_embedding, "k": 5})
+        search_end = time.time()
+        print(f"[TIMING] FAQ vector search took {search_end - search_start:.3f}s")
+        
+        # If no high-confidence results, try keyword matching
+        if not results or (results and results[0]['score'] < 0.8):
+            print(f"[DEBUG] Low confidence FAQ results, trying keyword search...")
+            
+            # Extract keywords from query
+            keywords = query.lower().split()
+            keyword_conditions = []
+            
+            for keyword in keywords:
+                if len(keyword) > 2:  # Skip very short words
+                    keyword_conditions.append(f"toLower(faq.question) CONTAINS '{keyword}' OR toLower(faq.answer) CONTAINS '{keyword}'")
+            
+            if keyword_conditions:
+                keyword_query = f"""
+                MATCH (faq:FAQ)
+                WHERE {' OR '.join(keyword_conditions)}
+                RETURN faq.question as question,
+                       faq.answer as answer,
+                       faq.id as id,
+                       0.6 as score
+                ORDER BY faq.id
+                LIMIT 3
+                """
+                
+                keyword_start = time.time()
+                keyword_results = neo4j_graph.query(keyword_query)
+                keyword_end = time.time()
+                print(f"[TIMING] FAQ keyword search took {keyword_end - keyword_start:.3f}s")
+                
+                # Combine results, avoiding duplicates
+                existing_questions = {r['question'] for r in results}
+                for kr in keyword_results:
+                    if kr['question'] not in existing_questions:
+                        results.append(kr)
+        
+        # Format results
+        if results:
+            top_result = results[0]
+            confidence = top_result['score']
+            
+            # Build response
+            response_parts = []
+            
+            # Primary answer
+            response_parts.append(f"**{top_result['question']}**")
+            response_parts.append(f"{top_result['answer']}")
+            
+            # Additional related FAQs if available
+            if len(results) > 1:
+                related_faqs = []
+                for faq in results[1:3]:  # Show up to 2 additional FAQs
+                    if faq['score'] > 0.6:  # Only show if reasonably relevant
+                        related_faqs.append(f"• **{faq['question']}**: {faq['answer']}")
+                
+                if related_faqs:
+                    response_parts.append("\n**Related Information:**")
+                    response_parts.extend(related_faqs)
+            
+            formatted_response = "\n\n".join(response_parts)
+            
+            faq_end = time.time()
+            print(f"[TIMING] Total get_faq_answer took {faq_end - faq_start:.3f}s")
+            print(f"[DEBUG] FAQ search found {len(results)} results with confidence {confidence:.3f}")
+            
+            return {
+                "success": True,
+                "answer": formatted_response,
+                "confidence": confidence,
+                "total_results": len(results),
+                "search_type": "FAQ database"
+            }
+        
+        else:
+            # No FAQ results found
+            faq_end = time.time()
+            print(f"[TIMING] get_faq_answer found no results in {faq_end - faq_start:.3f}s")
+            
+            return {
+                "success": False,
+                "answer": "I don't have specific information about that in our FAQ database. Please contact our restaurant directly for more details.",
+                "confidence": 0.0,
+                "total_results": 0,
+                "search_type": "FAQ database"
+            }
+    
+    except Exception as e:
+        faq_end = time.time()
+        print(f"[TIMING] get_faq_answer failed after {faq_end - faq_start:.3f}s")
+        print(f"[DEBUG] Error in get_faq_answer: {e}")
+        
+        return {
+            "success": False,
+            "answer": f"I encountered an error searching our FAQ database: {str(e)}",
+            "confidence": 0.0,
+            "total_results": 0,
+            "error": str(e),
+            "search_type": "FAQ database"
         }
 
 @tool
@@ -734,28 +1083,36 @@ def check_semantic_similarity(extracted_terms: Dict[str, Any]) -> Dict[str, Any]
     Returns:
         Dict with comprehensive match results and confidence scores
     """
-    print(f"[DEBUG] check_semantic_similarity called with terms: {extracted_terms}")
+    semantic_start = time.time()
+    print(f"[TIMING] check_semantic_similarity started with terms: {extracted_terms}")
     
     try:
-        # Setup Neo4j connection
-        neo4j_graph = Neo4jGraph(
-            url=os.getenv("NEO4J_URI"),
-            username=os.getenv("NEO4J_USER"),
-            password=os.getenv("NEO4J_PASSWORD"),
-            enhanced_schema=True
-        )
+        # Use pooled Neo4j connection
+        connection_start = time.time()
+        neo4j_graph = get_neo4j_connection()  # Now uses pooling
+        connection_end = time.time()
+        print(f"[TIMING] Neo4j connection for semantic search took {connection_end - connection_start:.3f}s")
         
-        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+        embeddings_init_start = time.time()
+        embeddings = get_embedding_model()  # Now uses pooling
+        embeddings_init_end = time.time()
+        print(f"[TIMING] Embeddings initialization took {embeddings_init_end - embeddings_init_start:.3f}s")
+        
         all_results = []
         match_confidence = 0.0
         
         # STEP 1: Search by dish names (highest priority)
         dish_names = extracted_terms.get("dish_names", [])
         if dish_names:
-            print(f"[DEBUG] Searching for dish names: {dish_names}")
+            dish_search_start = time.time()
+            print(f"[TIMING] Searching for dish names: {dish_names}")
             for dish_name in dish_names[:2]:  # Limit to top 2 dish names
                 try:
+                    embedding_start = time.time()
                     query_embedding = embeddings.embed_query(dish_name)
+                    embedding_end = time.time()
+                    print(f"[TIMING] Dish embedding for '{dish_name}' took {embedding_end - embedding_start:.3f}s")
+                    
                     dish_name_cypher = """
                     WITH $embedding AS queryEmbedding
                     CALL db.index.vector.queryNodes('menu_embed', $k, queryEmbedding)
@@ -779,8 +1136,12 @@ def check_semantic_similarity(extracted_terms: Dict[str, Any]) -> Dict[str, Any]
                     ORDER BY score DESC
                     """
                     
+                    query_start = time.time()
                     results = neo4j_graph.query(dish_name_cypher, 
                                               params={"embedding": query_embedding, "k": 8, "search_term": dish_name})
+                    query_end = time.time()
+                    print(f"[TIMING] Dish name query for '{dish_name}' took {query_end - query_start:.3f}s")
+                    
                     if results:
                         all_results.extend(results)
                         match_confidence = max(match_confidence, 0.9)
@@ -788,14 +1149,22 @@ def check_semantic_similarity(extracted_terms: Dict[str, Any]) -> Dict[str, Any]
                 
                 except Exception as e:
                     print(f"[DEBUG] Error in dish embedding search for '{dish_name}': {e}")
+            
+            dish_search_end = time.time()
+            print(f"[TIMING] Total dish name search took {dish_search_end - dish_search_start:.3f}s")
         
         # STEP 2: Search by ingredients
         ingredients = extracted_terms.get("ingredients", [])
         if ingredients and len(all_results) < 8:  # Only if we need more results
-            print(f"[DEBUG] Searching for ingredients: {ingredients}")
+            ingredient_search_start = time.time()
+            print(f"[TIMING] Searching for ingredients: {ingredients}")
             for ingredient in ingredients[:3]:  # Limit to top 3 ingredients
                 try:
+                    embedding_start = time.time()
                     query_embedding = embeddings.embed_query(ingredient)
+                    embedding_end = time.time()
+                    print(f"[TIMING] Ingredient embedding for '{ingredient}' took {embedding_end - embedding_start:.3f}s")
+                    
                     ingredient_cypher = """
                     WITH $embedding AS queryEmbedding
                     CALL db.index.vector.queryNodes('menu_embed', $k, queryEmbedding)
@@ -820,8 +1189,12 @@ def check_semantic_similarity(extracted_terms: Dict[str, Any]) -> Dict[str, Any]
                     ORDER BY score DESC
                     """
                     
+                    query_start = time.time()
                     results = neo4j_graph.query(ingredient_cypher, 
                                               params={"embedding": query_embedding, "k": 6, "search_term": ingredient})
+                    query_end = time.time()
+                    print(f"[TIMING] Ingredient query for '{ingredient}' took {query_end - query_start:.3f}s")
+                    
                     if results:
                         all_results.extend(results)
                         match_confidence = max(match_confidence, 0.75)
@@ -829,14 +1202,22 @@ def check_semantic_similarity(extracted_terms: Dict[str, Any]) -> Dict[str, Any]
                 
                 except Exception as e:
                     print(f"[DEBUG] Error in ingredient embedding search for '{ingredient}': {e}")
+            
+            ingredient_search_end = time.time()
+            print(f"[TIMING] Total ingredient search took {ingredient_search_end - ingredient_search_start:.3f}s")
         
         # STEP 3: Search by categories
         categories = extracted_terms.get("categories", [])
         if categories and len(all_results) < 8:
-            print(f"[DEBUG] Searching for categories: {categories}")
+            category_search_start = time.time()
+            print(f"[TIMING] Searching for categories: {categories}")
             for category in categories[:2]:
                 try:
+                    embedding_start = time.time()
                     query_embedding = embeddings.embed_query(category)
+                    embedding_end = time.time()
+                    print(f"[TIMING] Category embedding for '{category}' took {embedding_end - embedding_start:.3f}s")
+                    
                     category_cypher = """
                     WITH $embedding AS queryEmbedding
                     CALL db.index.vector.queryNodes('menu_embed', $k, queryEmbedding)
@@ -860,8 +1241,12 @@ def check_semantic_similarity(extracted_terms: Dict[str, Any]) -> Dict[str, Any]
                     ORDER BY score DESC
                     """
                     
+                    query_start = time.time()
                     results = neo4j_graph.query(category_cypher, 
                                               params={"embedding": query_embedding, "k": 5, "search_term": category})
+                    query_end = time.time()
+                    print(f"[TIMING] Category query for '{category}' took {query_end - query_start:.3f}s")
+                    
                     if results:
                         all_results.extend(results)
                         match_confidence = max(match_confidence, 0.65)
@@ -869,14 +1254,22 @@ def check_semantic_similarity(extracted_terms: Dict[str, Any]) -> Dict[str, Any]
                 
                 except Exception as e:
                     print(f"[DEBUG] Error in category embedding search for '{category}': {e}")
+            
+            category_search_end = time.time()
+            print(f"[TIMING] Total category search took {category_search_end - category_search_start:.3f}s")
         
         # STEP 4: Mixed search for descriptive terms and general queries
         descriptive_terms = extracted_terms.get("descriptive_terms", []) + extracted_terms.get("dietary_preferences", [])
         if descriptive_terms and len(all_results) < 10:
-            print(f"[DEBUG] Searching for descriptive terms: {descriptive_terms}")
+            mixed_search_start = time.time()
+            print(f"[TIMING] Searching for descriptive terms: {descriptive_terms}")
             combined_description = " ".join(descriptive_terms[:3])
             try:
+                embedding_start = time.time()
                 query_embedding = embeddings.embed_query(combined_description)
+                embedding_end = time.time()
+                print(f"[TIMING] Mixed embedding took {embedding_end - embedding_start:.3f}s")
+                
                 mixed_cypher = """
                 WITH $embedding AS queryEmbedding
                 CALL db.index.vector.queryNodes('menu_embed', $k, queryEmbedding)
@@ -908,8 +1301,12 @@ def check_semantic_similarity(extracted_terms: Dict[str, Any]) -> Dict[str, Any]
                 ORDER BY score DESC
                 """
                 
+                query_start = time.time()
                 results = neo4j_graph.query(mixed_cypher, 
                                           params={"embedding": query_embedding, "k": 12, "search_term": combined_description})
+                query_end = time.time()
+                print(f"[TIMING] Mixed query took {query_end - query_start:.3f}s")
+                
                 if results:
                     all_results.extend(results)
                     match_confidence = max(match_confidence, 0.6)
@@ -917,10 +1314,14 @@ def check_semantic_similarity(extracted_terms: Dict[str, Any]) -> Dict[str, Any]
             
             except Exception as e:
                 print(f"[DEBUG] Error in mixed embedding search: {e}")
+            
+            mixed_search_end = time.time()
+            print(f"[TIMING] Total mixed search took {mixed_search_end - mixed_search_start:.3f}s")
         
         # STEP 5: Final fallback to traditional string matching
         if not all_results:
-            print(f"[DEBUG] No embedding matches found, trying traditional string matching...")
+            fallback_start = time.time()
+            print(f"[TIMING] No embedding matches found, trying traditional string matching...")
             all_terms = []
             for category, terms in extracted_terms.items():
                 if isinstance(terms, list):
@@ -950,15 +1351,23 @@ def check_semantic_similarity(extracted_terms: Dict[str, Any]) -> Dict[str, Any]
                 """
                 
                 try:
+                    query_start = time.time()
                     results = neo4j_graph.query(fallback_query)
+                    query_end = time.time()
+                    print(f"[TIMING] String fallback query for '{term}' took {query_end - query_start:.3f}s")
+                    
                     if results:
                         all_results.extend(results)
                         match_confidence = max(match_confidence, 0.3)
                         print(f"[DEBUG] Found {len(results)} string matches for '{term}'")
                 except Exception as e:
                     print(f"[DEBUG] Error in string matching for '{term}': {e}")
+            
+            fallback_end = time.time()
+            print(f"[TIMING] Total fallback search took {fallback_end - fallback_start:.3f}s")
         
         # Remove duplicates and sort by score
+        dedup_start = time.time()
         unique_results = {}
         for item in all_results:
             dish_name = item['name']
@@ -966,6 +1375,8 @@ def check_semantic_similarity(extracted_terms: Dict[str, Any]) -> Dict[str, Any]
                 unique_results[dish_name] = item
         
         final_results = sorted(unique_results.values(), key=lambda x: x['score'], reverse=True)[:10]
+        dedup_end = time.time()
+        print(f"[TIMING] Deduplication and sorting took {dedup_end - dedup_start:.3f}s")
         
         # Determine match quality based on embedding types and scores
         has_high_confidence = any(item['score'] > 0.8 for item in final_results)
@@ -985,10 +1396,14 @@ def check_semantic_similarity(extracted_terms: Dict[str, Any]) -> Dict[str, Any]
             "search_summary": f"Found {len(final_results)} matches using unified embedding index with {match_confidence:.2f} confidence"
         }
         
+        semantic_end = time.time()
+        print(f"[TIMING] Total check_semantic_similarity took {semantic_end - semantic_start:.3f}s")
         print(f"[DEBUG] Unified semantic search result: {len(final_results)} matches, confidence: {match_confidence:.2f}")
         return result
         
     except Exception as e:
+        semantic_end = time.time()
+        print(f"[TIMING] check_semantic_similarity failed after {semantic_end - semantic_start:.3f}s")
         print(f"[DEBUG] Error in check_semantic_similarity: {e}")
         return {
             "matches": {},
@@ -1012,21 +1427,40 @@ def get_recommendations(query: str) -> Dict[str, Any]:
     Returns:
         Dict with response details including recommendations
     """
-    print(f"[DEBUG] get_recommendations called with query: {query}")
+    recommendations_start = time.time()
+    print(f"[TIMING] get_recommendations started with query: {query}")
+    
+    # Ensure system is initialized before processing
+    ensure_system_initialized()
+    
     try:
+        kg_call_start = time.time()
         result = kg_answer(query)
+        kg_call_end = time.time()
+        print(f"[TIMING] kg_answer call took {kg_call_end - kg_call_start:.3f}s")
+        
         # Filter out schema from debug output - only show semantic_answer and formatted result
+        filtering_start = time.time()
         filtered_result = {
             "semantic_answer": result.get("semantic_answer", "No semantic answer"),
             "formatted": result.get("formatted", "No formatted answer available")
         }
+        filtering_end = time.time()
+        print(f"[TIMING] Result filtering took {filtering_end - filtering_start:.3f}s")
+        
         print(f"[DEBUG] kg_answer returned: {filtered_result}")
+        
+        recommendations_end = time.time()
+        print(f"[TIMING] Total get_recommendations took {recommendations_end - recommendations_start:.3f}s")
+        
         return {
             "success": True,
             "response": result,
             # "message": result.get("message", ""),
         }
     except Exception as e:
+        recommendations_end = time.time()
+        print(f"[TIMING] get_recommendations failed after {recommendations_end - recommendations_start:.3f}s")
         print(f"[DEBUG] Exception in get_recommendations: {e}")
         return {
             "success": False,
@@ -1046,7 +1480,8 @@ def get_detailed_dish_info(dish_names: List[str]) -> Dict[str, Any]:
     Returns:
         Dict with detailed dish information including ingredients, prices, prep times, etc.
     """
-    print(f"[DEBUG] get_detailed_dish_info called with dishes: {dish_names}")
+    detail_start = time.time()
+    print(f"[TIMING] get_detailed_dish_info started for dishes: {dish_names}")
     
     if not dish_names:
         return {
@@ -1056,13 +1491,11 @@ def get_detailed_dish_info(dish_names: List[str]) -> Dict[str, Any]:
         }
     
     try:
-        # Setup Neo4j connection
-        neo4j_graph = Neo4jGraph(
-            url=os.getenv("NEO4J_URI"),
-            username=os.getenv("NEO4J_USER"),
-            password=os.getenv("NEO4J_PASSWORD"),
-            enhanced_schema=True
-        )
+        # Use pooled Neo4j connection
+        connection_start = time.time()
+        neo4j_graph = get_neo4j_connection()  # Now uses pooling
+        connection_end = time.time()
+        print(f"[TIMING] Neo4j connection for detailed info took {connection_end - connection_start:.3f}s")
         
         detailed_info = []
         
@@ -1101,7 +1534,11 @@ def get_detailed_dish_info(dish_names: List[str]) -> Dict[str, Any]:
             """
             
             try:
+                query_start = time.time()
                 results = neo4j_graph.query(dish_info_query)
+                query_end = time.time()
+                print(f"[TIMING] Detailed query for '{dish_name}' took {query_end - query_start:.3f}s")
+                
                 if results:
                     dish_info = results[0]  # Should be only one result per dish
                     detailed_info.append({
@@ -1127,6 +1564,9 @@ def get_detailed_dish_info(dish_names: List[str]) -> Dict[str, Any]:
             except Exception as e:
                 print(f"[DEBUG] Error getting detailed info for '{dish_name}': {e}")
         
+        detail_end = time.time()
+        print(f"[TIMING] Total get_detailed_dish_info took {detail_end - detail_start:.3f}s")
+        
         return {
             "success": True,
             "dishes": detailed_info,
@@ -1135,6 +1575,8 @@ def get_detailed_dish_info(dish_names: List[str]) -> Dict[str, Any]:
         }
         
     except Exception as e:
+        detail_end = time.time()
+        print(f"[TIMING] get_detailed_dish_info failed after {detail_end - detail_start:.3f}s")
         print(f"[DEBUG] Error in get_detailed_dish_info: {e}")
         return {
             "success": False,
@@ -1151,154 +1593,76 @@ waiter_agent_prompt = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            "You are a helpful restaurant agent with the persona of an experienced waiter who is very friendly and helpful, so speak like a courteous waiter."
-            "Your goal is to help guests with their questions and requests about the menu, dishes, recommendations, ingredients, and dietary information."
-            "You should always use the tools to answer the user's question and not make up any information."
-            "For any specific dish related question, you should first check if we have the exact dish in the menu."
-            "If we do not have the exact dish, you should use the check_semantic_similarity tool to find a similar dish."
-    
-
-            "\n\nCRITICAL: BE BRUTALLY HONEST ABOUT EXACT MENU AVAILABILITY"
-            "\nWhen users ask about specific dishes by name, you MUST follow this verification process:"
-            "\n1. EXACT MATCH CHECK: First verify if the exact dish name exists in our menu"
-            "\n2. IF EXACT MATCH FOUND: Proceed to answer about that dish"
-            "\n3. IF EXACT MATCH NOT FOUND: Be crystal clear that we DON'T have that specific dish"
-            "\n4. OFFER ALTERNATIVES: Only then mention similar dishes we DO have"
-            "\n"
-            "\nMANDATORY RESPONSE FORMAT FOR MISSING DISHES:"
-            "\n- 'We don't have [EXACT DISH NAME] on our menu, but we do have [SIMILAR DISH NAME] which is [description]'"
-            "\n- 'I don't see [EXACT DISH NAME] in our menu, however we offer [SIMILAR DISH NAME] which [explanation]'"
-            "\n- NEVER answer questions about dishes as if we serve them when we don't"
-            "\n- NEVER assume similar dishes are the same as what the customer asked for"
-            "\n- ALWAYS use the EXACT dish names from our menu in responses"
-            "\n"
-            "\nEXAMPLE - USER ASKS: 'How spicy is your Saag Paneer?'"
-            "\nCORRECT RESPONSE: 'We don't have Saag Paneer on our menu, but we do have Palak Paneer which is cottage cheese in spiced spinach puree. Our Palak Paneer has a spice level of 2/5...'"
-            "\nINCORRECT RESPONSE: 'Our Saag Paneer has a spice level of...' (This is misleading!)"
-            "\n"
-            "\nEXAMPLE - USER ASKS: 'What breads go with your Saag Paneer?'"
-            "\nCORRECT RESPONSE: 'We don't have Saag Paneer on our menu, but we do have Palak Paneer which is similar. For our Palak Paneer, both naan and tandoori roti pair beautifully...'"
-            "\nINCORRECT RESPONSE: 'When it comes to pairing bread with Saag Paneer...' (This implies we have it!)"
+            "You are a helpful restaurant waiter. Help guests with menu questions, recommendations, orders, and general restaurant information."
+            " Always use tools to get accurate information - never make up details."
             
-            "\n\nFORMATTING GUIDELINES FOR CLEAR PRESENTATION:"
-            "\nWhen presenting multiple dishes or items with structured information, use markdown tables for better readability:"
-            "\n- USE TABLES when showing multiple dishes/items with attributes like: price, spice level, prep time, ingredients, categories"
-            "\n- USE TABLES for comparison data, menu sections, or lists with consistent properties"
-            "\n- DON'T USE TABLES for: single dish descriptions, simple recommendations, conversational responses, or general information"
+            "\n\nWAITER PERSONA & LANGUAGE:"
+            "\n• Speak naturally like a friendly, knowledgeable waiter - not like an AI assistant"
+            "\n• NEVER mention 'retrieving information', 'searching database', or 'tools', etc"
+            "\n• Use natural phrases: 'Yes, we have...', 'Our chef makes...', 'I'd recommend...'"
+            "\n• Be confident and direct: 'Absolutely!' instead of 'It seems that...'"
+            "\n• Sound human: 'Let me check our specials' not 'Let me search our menu'"
             
-            "\nTable Format Guidelines:"
-            "\n- Use markdown table syntax: | Column 1 | Column 2 | Column 3 |"
-            "\n- Include relevant columns: Dish Name, Description, Price, Spice Level, Prep Time (as applicable)"
-            "\n- Keep descriptions concise in tables (1-2 lines max)"
-            "\n- Use emojis sparingly for visual appeal: 🌶️ for spice, ⏱️ for time, 💰 for price"
-            "\n- Always provide a brief intro before the table explaining what it shows"
+            "\n\nCURRENT DATE & TIME: {current_datetime}"
+            "\nIMPORTANT: Use this current time to provide accurate, contextual answers about operating hours."
+            "\n• If asked 'Are you open now?' - compare current time with operating hours from FAQ tool"
+            "\n• If current time is OUTSIDE operating hours → clearly state 'We are currently CLOSED'"
+            "\n• If current time is WITHIN operating hours → state 'Yes, we are currently open'"
+            "\n• Always be specific: 'We are open from X to Y' and 'We will open/close at Z'"
             
-            "\nEXAMPLE TABLE FORMAT:"
-            "\nHere are our paneer-based main course options:"
-            "\n| Dish Name | Description | ₹ Price | 🌶️ Spice Level | ⏱️ Prep Time |"
-            "\n|-----------|-------------|-------|-------------|-----------|"
-            "\n| Paneer Tikka Masala | Charred paneer in tomato gravy | ₹230 | 3/5 |  20 min |"
-            "\n| Palak Paneer | Cottage cheese in spiced spinach | ₹220 |  2/5 | 15 min |"
+            "\n\nTOOL SELECTION (be efficient):"
+            "\n• Order requests ('I want X') → get_detailed_dish_info(['item1', 'item2']) - single call"
+            "\n• Menu questions ('What do you have') → get_recommendations(query)"
+            "\n• Dish verification ('Do you have X') → check_semantic_similarity first"
+            "\n• Complex searches → extract_food_terms then check_semantic_similarity"
+            "\n• Restaurant info (hours, location, policies) → get_faq_answer(query)"
             
-            "\nDECISION PROCESS FOR TABLE USE:"
-            "\n1. If user asks for 'options', 'varieties', 'list of dishes', or 'what do you have' → Use tables"
-            "\n2. If response includes 3+ dishes with similar attributes → Use tables"
-            "\n3. If comparing dishes or showing menu categories → Use tables"
-            "\n4. If describing single dish in detail → Use regular text"
-            "\n5. If giving general recommendations or conversational response → Use regular text"
-            "\n6. If explaining ingredients or preparation methods → Use regular text"
+            "\n\nQUESTION ROUTING:"
+            "\n1. MENU QUESTIONS → Use menu tools (get_recommendations, check_semantic_similarity)"
+            "\n2. RESTAURANT INFO → Use get_faq_answer for:"
+            "\n   - Operating hours, timings"
+            "\n   - Location, address, directions"
+            "\n   - Parking availability, contact info"
+            "\n   - Services (delivery, takeaway, reservations)"
+            "\n   - Payment methods, policies"
+            "\n3. If unsure → Try menu tools first, then FAQ if no relevant results"
             
-            "\nALWAYS include a friendly introduction before tables and a helpful conclusion after tables."
+            "\n\nCRITICAL: EXACT DISH VERIFICATION"
+            "\nWhen users ask about specific dishes:"
+            "\n1. Check if we have the EXACT dish name"
+            "\n2. If YES → Answer about our dish"
+            "\n3. If NO → 'We don't have [THEIR DISH] but we do have [OUR SIMILAR DISH]'"
+            "\n4. NEVER pretend we have dishes we don't serve"
             
-            "\n\nFOLLOW THIS MANDATORY VERIFICATION PROCESS:"
-            "\n1. THOUGHT: Analyze user's query to identify EXACT dish names mentioned"
-            "\n2. ACTION: Use extract_food_terms to categorize terms, paying special attention to dish_names"
-            "\n3. THOUGHT: Review extracted dish_names - these are what user specifically asked about"
-            "\n4. ACTION: Use check_semantic_similarity to search for these exact dishes in our menu"
-            "\n5. CRITICAL THOUGHT: EXACT MATCH VERIFICATION - For each dish user mentioned:"
-            "\n   - Does our search return the EXACT dish name the user asked for?"
-            "\n   - If YES → We have that dish, proceed with information about it"
-            "\n   - If NO but similar dishes found → We DON'T have their dish, but have alternatives"
-            "\n   - If NO matches → We don't have anything similar"
-            "\n6. ACTION: Get detailed information using get_recommendations"
-            "\n7. MANDATORY RESPONSE FORMAT:"
-            "\n   - For EXACT matches: Answer directly about our dish"
-            "\n   - For NO exact matches: 'We don't have [USER'S DISH] but we do have [OUR SIMILAR DISH]'"
-            "\n   - NEVER pretend we have dishes we don't actually serve"
+            "\n\nFORMATTING:"
+            "\n• Multiple items with details → Use markdown tables"
+            "\n• Single dish descriptions → Regular text"
+            "\n• Include: | Dish Name | Description | Price | Spice Level | Prep Time |"
+            "\n• FAQ answers → Use clear headings and bullet points"
             
-            "\n\nSEARCH RESULT INTERPRETATION RULES:"
-            "\n- SYMBOLIC_ANSWER = Exact database matches (this is your primary source of truth)"
-            "\n- SEMANTIC_ANSWER = Similar items found via embedding search (these are alternatives/suggestions)"
-            "\n- ALWAYS check SYMBOLIC_ANSWER first for exact matches"
-            "\n- Only use SEMANTIC_ANSWER when SYMBOLIC_ANSWER is empty or doesn't contain exact matches"
-            "\n- If user asks for 'Saag Paneer' but symbolic shows 'Palak Paneer' → We DON'T have Saag Paneer"
-            "\n- If user asks for 'Butter Chicken' and symbolic shows 'Butter Chicken' → We DO have Butter Chicken"
-            "\n"
-            "\nEMBEDDING SEARCH ADVANTAGES:"
-            "\n- Unified embedding index: Single index for all searchable nodes (dishes, ingredients, categories, cuisines)"
-            "\n- Intelligent routing: Automatically finds dishes through multiple pathways (direct dish match, ingredient match, category match)"
-            "\n- Semantic understanding: Matches meaning, not just keywords, even with typos or variations"
-            "\n- Multi-stage search: Prioritizes exact matches while providing semantic fallbacks"
+            "\n\nOPTIMIZATION HINTS:"
+            "\n• optimization_hint='direct_menu_query' → Use get_recommendations"
+            "\n• optimization_hint='order_request' → Use get_detailed_dish_info directly"
+            "\n• optimization_hint='faq_query' → Use get_faq_answer directly"
             
-            "\n\nEXAMPLE NATURAL WORKFLOW:"
-            "\nUser: 'What's the difference between butter chicken and chicken tikka masala?'"
-            "\nTHOUGHT: User is asking about specific dishes - let me see if I have those exact dishes in the menu"
-            "\nACTION: check_semantic_similarity(extracted_terms_dict)"
-            "\nOBSERVATION: Found 'Butter Chicken' (exact match) and 'Chicken Tikka' (similar but not exact - no 'Chicken Tikka Masala')"
-            "\nTHOUGHT: User asked for 'Chicken Tikka Masala' but we only have 'Chicken Tikka' - I need to clarify this"
-            "\nACTION: get_recommendations('Butter Chicken and Chicken Tikka comparison')"
-            "\nRESPONSE: 'I'd be happy to help! We have Butter Chicken on our menu, but we don't have Chicken Tikka Masala. We do have Chicken Tikka, which is different. Would you like me to explain the difference between Butter Chicken and Chicken Tikka instead?'"
+            "\n\nEXAMPLES WITH NATURAL RESPONSES:"
+            "\n'I want butter chicken and naan' → get_detailed_dish_info → 'Excellent choice! Our Butter Chicken is...'"
+            "\n'Do you have Fish Curry?' → check_semantic_similarity → 'Yes, we have Fish Curry' OR 'We don't have Fish Curry, but our Prawn Curry is similar'"
+            "\n'Do you serve non-veg?' → get_recommendations → 'Absolutely! We have a great selection of chicken, mutton, and seafood dishes. What type of non-veg are you in the mood for?'"
+            "\n'What veg starters?' → get_recommendations → 'We have some wonderful vegetarian appetizers like...'"
+            "\n'What are your timings?' → get_faq_answer → 'We're open from 11 AM to 11 PM every day'"
+            "\n'Are you open now?' at 2:30 AM → 'We're currently closed. We'll be open again at 11 AM'"
+            "\n'Where are you located?' → get_faq_answer → 'We're located at [address]. It's easy to find with plenty of parking'"
             
-            "\n\nEXAMPLE NATURAL WORKFLOW 2 (EXACT DISH VERIFICATION):"
-            "\nUser: 'How spicy is the Andhra-style Chicken on a scale of 1–10? Can the kitchen make it milder?'"
-            "\nTHOUGHT: User is asking about a specific dish 'Andhra-style Chicken' - I need to verify if we have this EXACT dish"
-            "\nACTION: check_semantic_similarity(extracted_terms_dict)"
-            "\nOBSERVATION: Search results show 'Andhra Mutton Curry' but NO 'Andhra-style Chicken' found"
-            "\nTHOUGHT: Critical - the user asked for 'Andhra-style Chicken' but we don't have that exact dish. I found 'Andhra Mutton Curry' which is similar but different. I MUST be transparent about this."
-            "\nACTION: get_recommendations('Andhra cuisine dishes')"
-            "\nRESPONSE: 'We don't have Andhra-style Chicken on our menu, but we do have Andhra Mutton Curry which is a spicy traditional dish from Andhra Pradesh. Our Andhra Mutton Curry has a spice level of 4/5, and yes, our kitchen can definitely make it milder to suit your preference!'"
-            "\n"
-            "\nEXAMPLE NATURAL WORKFLOW 3 (SAAG PANEER CASE):"
-            "\nUser: 'Which breads go best with your Saag Paneer—naan or tandoori roti?'"
-            "\nTHOUGHT: User specifically asked about 'Saag Paneer' - I need to check if we have this exact dish"
-            "\nACTION: check_semantic_similarity(extracted_terms_dict)"
-            "\nOBSERVATION: Search results show 'Palak Paneer' but NO 'Saag Paneer' found"
-            "\nTHOUGHT: The user asked for 'Saag Paneer' but we only have 'Palak Paneer'. These are similar (both are spinach with paneer) but different names. I must clarify we don't have Saag Paneer."
-            "\nACTION: get_recommendations('Palak Paneer bread pairing')"
-            "\nRESPONSE: 'We don't have Saag Paneer on our menu, but we do have Palak Paneer which is cottage cheese in spiced spinach puree. For our Palak Paneer, both naan and tandoori roti pair beautifully! The soft naan is great for scooping, while the tandoori roti offers a heartier, more rustic pairing.'"
-
-            "\n\nEXAMPLE FOR GENERAL QUERY:"
-            "\nUser: 'Do you have any creamy paneer dishes?'"
-            "\nTHOUGHT: User wants creamy paneer dishes, this is a general category search"
-            "\nACTION: extract_food_terms('creamy paneer dishes')"
-            "\nOBSERVATION: Extracted: {{'ingredients': ['paneer'], 'descriptive_terms': ['creamy'], ...}}"
-            "\nACTION: check_semantic_similarity(extracted_terms_dict)"
-            "\nOBSERVATION: Found exact matches: Paneer Butter Masala, Shahi Paneer, etc."
-            "\nTHOUGHT: Great! We have exactly what they're looking for"
-            "\nACTION: get_recommendations('creamy paneer dishes')"
-            "\nRESPONSE: 'Absolutely! We have several wonderfully creamy paneer dishes. Our Paneer Butter Masala and Shahi Paneer are particularly popular...'"
+            "\n\nAvailable tools: extract_food_terms, check_semantic_similarity, get_detailed_dish_info, get_recommendations, get_faq_answer, debug_embedding_indexes, CompleteOrEscalate"
             
-            "\n\nKEY IMPROVEMENTS:"
-            "\n- Unified semantic search through single embedding index with intelligent routing"
-            "\n- Multi-pathway matching (dish→ingredient→category→cuisine) ensures comprehensive results"
-            "\n- Confidence scoring helps determine response certainty"
-            "\n- Categorized extraction improves search precision"
-            
-            "\n\nAvailable tools:"
-            "\n1. extract_food_terms: LLM-powered categorization of food terms for optimized embedding search"
-            "\n2. check_semantic_similarity: Advanced embedding-based search using unified menu_embed index"
-            "\n3. get_detailed_dish_info: Get comprehensive details for specific dishes (use after embedding search)"
-            "\n4. get_recommendations: General menu information and recommendations (provides comprehensive dish info)"
-            "\n5. debug_embedding_indexes: Check if unified embedding index exists (use if embeddings fail)"
-            "\n6. CompleteOrEscalate: Transfer control if needed"
-            
-            "\n\nPersonalization info:\n<user_information>\n{user_info}\n</user_information>"
+            "\n\nPersonalization: {user_info}"
         ),
         ("placeholder", "{messages}"),
     ]
 )
 
-waiter_agent_tools = [extract_food_terms, check_semantic_similarity, get_recommendations, get_detailed_dish_info, debug_embedding_indexes]
+waiter_agent_tools = [extract_food_terms, check_semantic_similarity, get_recommendations, get_detailed_dish_info, get_faq_answer, debug_embedding_indexes]
 waiter_agent_runnable = waiter_agent_prompt | llm.bind_tools(waiter_agent_tools + [CompleteOrEscalate])
 
 
@@ -1529,6 +1893,9 @@ class ReactWaiterAgent(Assistant):
         super().__init__(runnable)
     
     def __call__(self, state: State, config: RunnableConfig):
+        waiter_start = time.time()
+        print(f"[TIMING] ReactWaiterAgent started processing")
+        
         # Extract user info from config or state
         configuration = config.get("configurable", {})
         phone_number = configuration.get("phone_number", None)
@@ -1536,10 +1903,49 @@ class ReactWaiterAgent(Assistant):
         # Create user_info from available data
         user_info = f"Phone: {phone_number}" if phone_number else "No user info available"
         
-        # Add user_info to state for the prompt - the LLM will handle term extraction via tools
-        state_with_user_info = {**state, "user_info": user_info}
+        # Add current date and time for contextual responses (IST)
+        from datetime import datetime
+        import pytz
         
-        return super().__call__(state_with_user_info, config)
+        # Get current time in IST (Indian Standard Time)
+        ist = pytz.timezone('Asia/Kolkata')
+        current_datetime = datetime.now(ist).strftime("%A, %B %d, %Y at %I:%M %p IST")
+        
+        # Add user_info and current_datetime to state for the prompt
+        state_with_user_info = {**state, "user_info": user_info, "current_datetime": current_datetime}
+        
+        # Optimize for efficiency - check if this looks like a straightforward menu query
+        last_message = state.get("messages", [])[-1] if state.get("messages") else None
+        if last_message and hasattr(last_message, 'content'):
+            user_query = last_message.content.lower()
+            
+            # For simple menu queries, try direct recommendation first
+            simple_patterns = [
+                'recommend', 'suggest', 'what do you have', 'show me', 'do you have',
+                'menu', 'dish', 'food', 'items', 'options', 'varieties'
+            ]
+            
+            # For order/confirmation requests, be more direct
+            order_patterns = [
+                'i want', 'i would like', 'can i have', 'please get me', 'order',
+                'i\'ll have', 'give me', 'i need', 'can you bring'
+            ]
+            
+            if any(pattern in user_query for pattern in simple_patterns):
+                print(f"[DEBUG] Detected simple menu query, optimizing workflow")
+                # Add a hint to the agent to be more direct
+                state_with_user_info["optimization_hint"] = "direct_menu_query"
+            elif any(pattern in user_query for pattern in order_patterns):
+                print(f"[DEBUG] Detected order request, optimizing for multi-item processing")
+                # Add a hint for order processing
+                state_with_user_info["optimization_hint"] = "order_request"
+        
+        result = super().__call__(state_with_user_info, config)
+        
+        waiter_end = time.time()
+        print(f"[TIMING] ReactWaiterAgent completed in {waiter_end - waiter_start:.3f}s")
+        
+        return result
 
 # Wrap waiter agent with ReAct logic
 def waiter_agent_with_debug(state: State, config: RunnableConfig):
@@ -1554,6 +1960,9 @@ def waiter_agent_with_debug(state: State, config: RunnableConfig):
         return {
             "messages": [AIMessage(content="I'd be happy to help you with our menu! However, first, may I please have your 10-digit phone number? This will help me provide you with personalized service and assistance.")]
         }
+    
+    # Ensure system is initialized before processing menu queries
+    ensure_system_initialized()
     
     # Check if this is the first time waiter agent is called (after registration)
     messages = state.get("messages", [])
@@ -1597,6 +2006,14 @@ import uuid
 
 def run_command_line_interface():
     """Run the command-line chat interface"""
+    print("🔄 Initializing system for command-line interface...")
+    
+    # Initialize system first
+    init_result = ensure_system_initialized()
+    if not init_result["success"]:
+        print(f"❌ Failed to initialize system: {init_result.get('error', 'Unknown error')}")
+        print("⚠️ Some features may not work properly. Continuing anyway...")
+    
     thread_id = str(uuid.uuid4())
     config = {
         "configurable": {
@@ -1626,5 +2043,122 @@ def run_command_line_interface():
 # Only run the command line interface if this script is executed directly
 if __name__ == "__main__":
     run_command_line_interface()
+
+# Add startup initialization
+def initialize_restaurant_system():
+    """
+    Pre-warm all expensive operations during app startup to eliminate first-request latency.
+    Call this once when the application starts.
+    """
+    init_start = time.time()
+    print("\n" + "="*60)
+    print("🚀 INITIALIZING NEEMSI RESTAURANT SYSTEM")
+    print("="*60)
+    
+    try:
+        # 1. Pre-warm Neo4j connection
+        print("📡 Establishing Neo4j connection...")
+        connection_start = time.time()
+        neo4j_graph = get_neo4j_connection()
+        connection_end = time.time()
+        print(f"✅ Neo4j connected in {connection_end - connection_start:.3f}s")
+        
+        # 2. Pre-warm Cypher chain and schema
+        print("⚙️  Setting up Cypher chain and caching schema...")
+        chain_start = time.time()
+        cypher_chain, _ = get_cypher_chain()
+        chain_end = time.time()
+        print(f"✅ Cypher chain ready in {chain_end - chain_start:.3f}s")
+        
+        # 3. Pre-warm embedding model
+        print("🧠 Loading embedding model...")
+        embed_start = time.time()
+        embedding_model = get_embedding_model()
+        embed_end = time.time()
+        print(f"✅ Embedding model loaded in {embed_end - embed_start:.3f}s")
+        
+        # 4. Test all systems with a quick query
+        print("🧪 Testing system with sample query...")
+        test_start = time.time()
+        
+        # Quick test query to ensure everything works
+        test_result = neo4j_graph.query("MATCH (d:Dish) RETURN count(d) as dish_count LIMIT 1")
+        dish_count = test_result[0]['dish_count'] if test_result else 0
+        
+        # Test embedding generation
+        test_embedding = embedding_model.embed_query("test")
+        
+        test_end = time.time()
+        print(f"✅ System test passed in {test_end - test_start:.3f}s")
+        print(f"📊 Database contains {dish_count} dishes")
+        
+        # 5. Pre-cache some common queries to improve first user experience
+        print("🗄️  Pre-caching common queries...")
+        cache_start = time.time()
+        
+        common_queries = [
+            "vegetarian starters",
+            "paneer dishes", 
+            "spicy main course",
+            "desserts",
+            "beverages"
+        ]
+        
+        for query in common_queries:
+            try:
+                # This will cache the results for instant retrieval
+                kg_answer(query)
+                print(f"   ✓ Cached: {query}")
+            except Exception as e:
+                print(f"   ⚠️  Failed to cache '{query}': {e}")
+        
+        cache_end = time.time()
+        print(f"✅ Common queries cached in {cache_end - cache_start:.3f}s")
+        
+        init_end = time.time()
+        total_time = init_end - init_start
+        
+        print("\n" + "="*60)
+        print(f"🎉 SYSTEM READY! Total initialization: {total_time:.3f}s")
+        print("💡 First user query will now be FAST!")
+        print("="*60 + "\n")
+        
+        return {
+            "success": True,
+            "total_time": total_time,
+            "dish_count": dish_count,
+            "message": f"System initialized successfully in {total_time:.3f}s"
+        }
+        
+    except Exception as e:
+        init_end = time.time()
+        total_time = init_end - init_start
+        
+        print("\n" + "="*60)
+        print(f"❌ INITIALIZATION FAILED after {total_time:.3f}s")
+        print(f"Error: {e}")
+        print("="*60 + "\n")
+        
+        return {
+            "success": False,
+            "total_time": total_time,
+            "error": str(e),
+            "message": f"System initialization failed: {e}"
+        }
+
+# Call initialization when module is imported (but only once)
+_system_initialized = False
+
+def ensure_system_initialized():
+    """Ensure system is initialized - call this before any restaurant operations"""
+    global _system_initialized
+    
+    if not _system_initialized:
+        result = initialize_restaurant_system()
+        _system_initialized = result["success"]
+        return result
+    else:
+        print("🔄 System already initialized - ready to serve!")
+        return {"success": True, "message": "System already initialized"}
 
 

@@ -130,6 +130,7 @@ def run_streamlit():
     print("🚀 Starting Neemsi Restaurant Assistant - Streamlit UI...")
     print("📱 The app will run at http://localhost:8501")
     print("🔧 Debug output will appear in this terminal")
+    print("⚡ Note: System will pre-initialize on startup for faster responses!")
     print("-" * 60)
     
     # Ensure port 8501 is available
@@ -148,6 +149,7 @@ def run_streamlit():
         ]
         
         print("🔄 Launching Streamlit...")
+        print("🧠 The system will initialize connections and cache data during startup...")
         print(f"🌐 Opening browser at http://localhost:8501")
         
         subprocess.run(cmd, check=True)

@@ -8,15 +8,23 @@ import time
 from langchain_core.messages import HumanMessage, AIMessage
 
 # Import from your main application
-from main import graph
+from main import graph, ensure_system_initialized
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
+# 🚀 PRE-WARM SYSTEM AT STARTUP - This eliminates first-request latency!
+print("🔄 Starting Streamlit app with system pre-warming...")
+initialization_result = ensure_system_initialized()
+if initialization_result["success"]:
+    print("✅ Streamlit app ready with pre-warmed system!")
+else:
+    print(f"⚠️ Streamlit app started with initialization issues: {initialization_result.get('error', 'Unknown error')}")
+
 # Configure Streamlit page
 st.set_page_config(
-    page_title="Neemsi Restaurant Assistant",
+    page_title="Restaurant Assistant",
     page_icon="🍽️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -370,14 +378,14 @@ def main():
     render_sidebar()
     
     # App header
-    st.markdown('<div class="main-header">🍽️ Neemsi Restaurant Assistant</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">🍽️ My Restaurant Assistant</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-header">Your AI-powered dining companion for personalized menu recommendations</div>', unsafe_allow_html=True)
     
     # Welcome message for new users
     if not st.session_state.initialized and len(st.session_state.messages) == 0:
         st.markdown("""
         <div class="welcome-message">
-            <h3>🌟 Welcome to Neemsi Restaurant! 🌟</h3>
+            <h3>🌟 Welcome to My Restaurant! 🌟</h3>
             <p>I'm your personal dining assistant, ready to help you explore our delicious menu.</p>
             <p>To get started, I'll need your 10-digit phone number for personalized service.</p>
             <p>Feel free to ask me about our dishes, ingredients, dietary options, or recommendations!</p>
