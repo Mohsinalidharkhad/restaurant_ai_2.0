@@ -70,13 +70,7 @@ st.markdown("""
         text-align: center;
         margin-bottom: 2rem;
     }
-    .chat-container {
-        height: 600px;
-        overflow-y: auto;
-    }
-    .scroll-to-bottom {
-        height: 1px;
-    }
+    /* Removed chat-container and scroll-to-bottom - using Streamlit's native scroll behavior */
     .latency-info {
         font-size: 0.7rem;
         color: #888;
@@ -113,6 +107,7 @@ def initialize_session_state():
         st.session_state.graph_state = {
             "messages": [], 
             "is_registered": False,
+            "phone_number": None,  # Added for phone number persistence
             "dialog_state": []
         }
     
@@ -136,11 +131,7 @@ def initialize_session_state():
     if "last_request_time" not in st.session_state:
         st.session_state.last_request_time = 0
         
-    if "pending_user_input" not in st.session_state:
-        st.session_state.pending_user_input = None
-        
-    if "scroll_to_bottom" not in st.session_state:
-        st.session_state.scroll_to_bottom = False
+    # Removed pending_user_input and scroll_to_bottom - no longer needed
         
     if "user_name" not in st.session_state:
         st.session_state.user_name = ""
@@ -253,6 +244,7 @@ def process_user_message(user_input: str) -> tuple[str, float]:
         current_state = {
             "messages": st.session_state.graph_state["messages"].copy(),
             "is_registered": st.session_state.graph_state.get("is_registered", False),
+            "phone_number": st.session_state.graph_state.get("phone_number", None),
             "dialog_state": st.session_state.graph_state.get("dialog_state", [])
         }
         
@@ -279,8 +271,14 @@ def process_user_message(user_input: str) -> tuple[str, float]:
         st.session_state.graph_state.update({
             "messages": messages,
             "is_registered": result.get("is_registered", st.session_state.graph_state.get("is_registered", False)),
+            "phone_number": result.get("phone_number", st.session_state.graph_state.get("phone_number", None)),
             "dialog_state": result.get("dialog_state", [])
         })
+        
+        # Also update app config if phone number was extracted
+        if result.get("phone_number") and result.get("phone_number") != st.session_state.app_config["configurable"].get("phone_number"):
+            st.session_state.app_config["configurable"]["phone_number"] = result.get("phone_number")
+            print(f"[STREAMLIT DEBUG] Updated app config with extracted phone number: {result.get('phone_number')}")
         
         # Extract customer information from tool results when user becomes registered
         if result.get("is_registered", False):
@@ -326,7 +324,7 @@ def process_user_message(user_input: str) -> tuple[str, float]:
         return error_message, latency
 
 def display_chat_history():
-    """Display chat history with custom styling"""
+    """Display chat history with custom styling using Streamlit's native chat components"""
     for i, message in enumerate(st.session_state.messages):
         if message["role"] == "user":
             st.chat_message("user").write(message["content"])
@@ -343,11 +341,6 @@ def display_chat_history():
                     else:
                         latency_text = f"⚡ {latency:.2f}s"
                     st.markdown(f'<div class="latency-info">{latency_text}</div>', unsafe_allow_html=True)
-    
-    # Add a unique anchor that changes with each new message to force scroll
-    if st.session_state.messages:
-        anchor_id = f"msg-{len(st.session_state.messages)}"
-        st.markdown(f'<div id="{anchor_id}" style="height: 1px;"></div>', unsafe_allow_html=True)
 
 def render_sidebar():
     """Render the sidebar - called at the beginning to ensure stability"""
@@ -356,18 +349,32 @@ def render_sidebar():
         
         # Display current registration status
         is_registered = st.session_state.graph_state.get("is_registered", False)
-        if is_registered:
-            st.success("🟢 Registration Status: Registered")
-        else:
-            st.error("🔴 Registration Status: Not Registered")
+        has_phone = st.session_state.graph_state.get("phone_number") or st.session_state.user_phone
         
-        # Display user information when registered
         if is_registered:
-            st.markdown("**User Name:** " + (st.session_state.user_name if st.session_state.user_name else ""))
-            st.markdown("**Mobile Number:** " + (st.session_state.user_phone if st.session_state.user_phone else ""))
+            st.success("🟢 Status: Registered")
+        elif has_phone:
+            st.info("🔵 Status: Phone Verified for Reservations")
         else:
-            st.markdown("**User Name:** ")
-            st.markdown("**Mobile Number:** ")
+            st.info("🔵 Status: Registration not required for menu browsing")
+        
+        # Display user information when registered or has phone
+        if is_registered or has_phone:
+            display_name = st.session_state.user_name if st.session_state.user_name else "User"
+            display_phone = has_phone if has_phone else st.session_state.user_phone
+            
+            if display_name and display_name != "User":
+                st.markdown("**User Name:** " + display_name)
+            if display_phone:
+                st.markdown("**Mobile Number:** " + display_phone)
+        
+        if not is_registered:
+            st.markdown("**Note:** You can browse menu and get recommendations without registration")
+            if has_phone:
+                st.markdown("**Phone verified for:** Reservations and booking management")
+                st.markdown("**Full registration needed for:** Placing orders, billing")
+            else:
+                st.markdown("**Registration needed for:** Placing orders, making reservations, billing")
 
 def main():
     """Main Streamlit application"""
@@ -379,7 +386,7 @@ def main():
     
     # App header
     st.markdown('<div class="main-header">🍽️ My Restaurant Assistant</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Your AI-powered dining companion for personalized menu recommendations</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Your AI-powered dining companion for personalized menu recommendations and reservations management</div>', unsafe_allow_html=True)
     
     # Welcome message for new users
     if not st.session_state.initialized and len(st.session_state.messages) == 0:
@@ -387,90 +394,55 @@ def main():
         <div class="welcome-message">
             <h3>🌟 Welcome to My Restaurant! 🌟</h3>
             <p>I'm your personal dining assistant, ready to help you explore our delicious menu.</p>
-            <p>To get started, I'll need your 10-digit phone number for personalized service.</p>
-            <p>Feel free to ask me about our dishes, ingredients, dietary options, or recommendations!</p>
+            <p><strong>Browse freely!</strong> Ask me about dishes, ingredients, dietary options, or recommendations.</p>
+            <p><em>Registration is only needed when you're ready to place an order or make a reservation.</em></p>
         </div>
         """, unsafe_allow_html=True)
         
         # Add initial assistant message
-        initial_message = "Welcome to Neemsi! Please provide your 10-digit phone number to help you further!"
+        initial_message = "Hello! Welcome to My Restaurant. I'm here to help you explore our menu and answer any questions about our dishes. What would you like to know about our food today?"
         add_message_to_history("assistant", initial_message)
         st.session_state.initialized = True
     
-    # Create a container for the chat
-    chat_container = st.container()
+    # Display chat history
+    display_chat_history()
     
-    with chat_container:
-        # Display chat history
-        display_chat_history()
-        
-        # Auto-scroll functionality
-        if st.session_state.scroll_to_bottom and len(st.session_state.messages) > 0:
-            # Get the latest message anchor ID
-            latest_anchor = f"msg-{len(st.session_state.messages)}"
-            
-            # JavaScript to scroll to the latest message
-            st.markdown(f"""
-            <script>
-                function scrollToLatest() {{
-                    setTimeout(function() {{
-                        var latestMsg = document.getElementById('{latest_anchor}');
-                        if (latestMsg) {{
-                            latestMsg.scrollIntoView({{ behavior: 'smooth', block: 'end' }});
-                        }}
-                    }}, 100);
-                }}
-                scrollToLatest();
-            </script>
-            """, unsafe_allow_html=True)
-            
-            # Reset scroll flag
-            st.session_state.scroll_to_bottom = False
-        
-        # Additional fallback: Use URL fragment to maintain position
-        if len(st.session_state.messages) > 0:
-            st.markdown(f"<style>#msg-{len(st.session_state.messages)} {{ scroll-margin-top: 20px; }}</style>", unsafe_allow_html=True)
-        
-        # Check if we need to process a pending user input
-        if st.session_state.pending_user_input and not st.session_state.processing:
-            st.session_state.processing = True
-            
-            # Show thinking spinner and process the message
-            with st.spinner("🤔 Thinking..."):
-                response, latency = process_user_message(st.session_state.pending_user_input)
-            
-            # Add assistant response to history with latency
-            if response and response.strip():
-                add_message_to_history("assistant", response, latency)
-            
-            # Clear pending input and reset processing state
-            st.session_state.pending_user_input = None
-            st.session_state.processing = False
-            
-            # Set scroll flag to scroll to bottom after assistant response
-            st.session_state.scroll_to_bottom = True
-            
-            # Rerun to show the assistant response
-            st.rerun()
-    
-    # Chat input
+    # Chat input - process immediately in same render cycle
     if user_input := st.chat_input("Type your message here...", disabled=st.session_state.processing):
         current_time = time.time()
         # Rate limiting: prevent requests within 1 second of each other
         if not st.session_state.processing and (current_time - st.session_state.last_request_time) > 1.0:
             st.session_state.last_request_time = current_time
+            st.session_state.processing = True
             
-            # Immediately add user message to history and show it
+            # Immediately add user message to history
             add_message_to_history("user", user_input)
             
-            # Set pending input for processing on next render
-            st.session_state.pending_user_input = user_input
+            # Show user message immediately
+            st.chat_message("user").write(user_input)
             
-            # Set scroll flag to scroll to bottom after rerun
-            st.session_state.scroll_to_bottom = True
+            # Process the message and show response
+            with st.chat_message("assistant"):
+                with st.spinner("🤔 Thinking..."):
+                    response, latency = process_user_message(user_input)
+                
+                # Display response
+                if response and response.strip():
+                    st.write(response)
+                    
+                    # Add latency info
+                    if latency < 1.0:
+                        latency_text = f"⚡ {latency*1000:.0f}ms"
+                    else:
+                        latency_text = f"⚡ {latency:.2f}s"
+                    st.markdown(f'<div class="latency-info">{latency_text}</div>', unsafe_allow_html=True)
+                    
+                    # Add to message history
+                    add_message_to_history("assistant", response, latency)
             
-            # Rerun to immediately show user message
-            st.rerun()
+            # Reset processing state
+            st.session_state.processing = False
+            
         elif st.session_state.processing:
             st.info("⏳ Please wait for the current message to be processed...")
         else:

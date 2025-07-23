@@ -4,7 +4,7 @@ An intelligent restaurant assistant powered by AI, built with LangGraph, Neo4j, 
 
 ## 🌟 Features
 
-- **🤖 Multi-Agent Architecture**: Registration agent for customer onboarding and waiter agent for menu assistance
+- **🤖 Single Agent Architecture**: Intelligent waiter agent handles both menu assistance and customer registration when needed
 - **🔍 Semantic Search**: Vector embeddings and graph-based search for intelligent menu recommendations
 - **📊 Knowledge Graph**: Neo4j-powered menu database with relationships between dishes, ingredients, categories, and cuisines
 - **👤 Customer Management**: Supabase-backed user profiles with preferences and dietary restrictions
@@ -24,7 +24,7 @@ An intelligent restaurant assistant powered by AI, built with LangGraph, Neo4j, 
                                  │
                     ┌─────────────▼──────────────┐
                     │       LangGraph Core       │
-                    │  (Registration + Waiter)   │
+                    │    (Single Waiter Agent)   │
                     └─────────────┬──────────────┘
                                  │
           ┌──────────────────────┼──────────────────────┐
@@ -154,7 +154,7 @@ Bot: Yes! We have several delicious paneer options: Paneer Tikka, Paneer Makhani
 
 ### Core Components
 
-- **`main.py`**: LangGraph application with multi-agent architecture
+- **`main.py`**: LangGraph application with single agent architecture
 - **`embed.py`**: Vector embedding generation for semantic search
 - **`streamlit_app.py`**: Modern web interface with real-time chat
 - **`run_app.py`**: Application launcher with port management
@@ -162,15 +162,12 @@ Bot: Yes! We have several delicious paneer options: Paneer Tikka, Paneer Makhani
 
 ### Agent Architecture
 
-1. **Registration Agent**
-   - Handles customer onboarding
-   - Collects preferences and allergen information
-   - Manages Supabase customer records
-
-2. **Waiter Agent**
+**Waiter Agent**
    - Processes menu queries using Neo4j knowledge graph
    - Provides semantic search capabilities
    - Offers personalized recommendations
+   - Handles customer registration when needed for orders/reservations
+   - Manages Supabase customer records
 
 ### Search Capabilities
 

@@ -82,10 +82,10 @@ class State(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
     user_info: str
     is_registered: bool
+    phone_number: str  # Added for phone number persistence across tool calls
     dialog_state: Annotated[
         list[
             Literal[
-                "registration_agent",
                 "waiter_agent",
             ]
         ],
@@ -120,164 +120,17 @@ class Assistant:
                 break
         return {"messages": [result]}
         
-class CompleteOrEscalate(BaseModel):
-    """A tool to mark the current task as completed and/or to escalate control of the dialog to the main assistant,
-    who can re-route the dialog based on the user's needs."""
-
-    cancel: bool = True
-    reason: str
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "cancel": True,
-                "reason": "User changed their mind about the current task.",
-            },
-            "example 2": {
-                "cancel": True,
-                "reason": "I have fully completed the task.",
-            },
-            "example 3": {
-                "cancel": False,
-                "reason": "I need to search the user's emails or calendar for more information.",
-            },
-        }
+# CompleteOrEscalate removed - no longer needed without separate registration agent
 
 
-# --- Registration Agent Tools ---
-@tool
-def get_customer(config: RunnableConfig, phone_number: str) -> list[dict]:
-    """Check if a user is registered by phone number using Supabase and fetch their details"""
-    print(f"[DEBUG] get_customer called with phone_number: '{phone_number}'")
-    if not phone_number:
-        configuration = config.get("configurable", {})
-        phone_number = configuration.get("phone_number", None)
-        print(f"[DEBUG] get_customer using config phone_number: '{phone_number}'")
-    if not phone_number:
-        print("[DEBUG] get_customer: No phone number present, raising error")
-        raise ValueError("No phone number present")
-    print(f"[DEBUG] get_customer: Querying database for phone_number: '{phone_number}'")
-    response = supabase.table('customers').select('*').eq('phone_number', phone_number).execute()
-    if response.data and len(response.data) > 0:
-        customer = response.data[0]
-        print(f"[DEBUG] get_customer: Found customer: {customer.get('name')} with phone {phone_number}")
-        return {
-            "registered": True,
-            "name": customer.get("name"),
-            "preferences": customer.get("preferences"),
-            "allergies": customer.get("allergies"),
-            "set_is_registered": True
-        }
-    else:
-        print(f"[DEBUG] get_customer: No customer found for phone_number: '{phone_number}'")
-        return {"registered": False, "set_is_registered": False}
-
-@tool
-def mark_registration_complete(config: RunnableConfig, phone_number: str = None, name: str = None, reason: str = "Registration process completed") -> dict:
-    """Mark the registration process as complete, allowing transition to waiter agent. Creates minimal customer record if needed."""
-    print(f"[DEBUG] mark_registration_complete called with phone_number: '{phone_number}', name: '{name}', reason: '{reason}'")
-    configuration = config.get("configurable", {})
-    
-    if not phone_number:
-        phone_number = configuration.get("phone_number", None)
-        print(f"[DEBUG] mark_registration_complete using config phone_number: '{phone_number}'")
-    if not name:
-        name = configuration.get("name", None)
-        print(f"[DEBUG] mark_registration_complete using config name: '{name}'")
-    
-    # If we have phone and name, create a minimal customer record
-    if phone_number and name:
-        try:
-            # Check if customer exists
-            existing = supabase.table('customers').select('*').eq('phone_number', phone_number).execute()
-            if not existing.data:
-                # Create minimal customer record
-                customer_data = {
-                    "phone_number": phone_number,
-                    "name": name,
-                    "preferences": {},
-                    "allergies": [],
-                }
-                result = supabase.table('customers').insert(customer_data).execute()
-        except Exception as e:
-            print(f"Error creating minimal customer record: {e}")
-    
-    return {"success": True, "set_is_registered": True, "message": f"Registration marked complete: {reason}"}
-
-@tool
-def create_or_update_customer(config: RunnableConfig, phone_number: str, name: str, preferences: Optional[dict]= None, allergies: Optional[list[str]]=None) -> list[dict]:
-    """Register a new customer or update an existing customer in Supabase."""
-    print(f"[DEBUG] create_or_update_customer called with phone_number: '{phone_number}', name: '{name}', preferences: {preferences}, allergies: {allergies}")
-    configuration = config.get("configurable", {})
-    phone_number_config = configuration.get("phone_number", None)
-    if not phone_number:
-        phone_number = phone_number_config
-    name_config = configuration.get("name", None)
-    if not name:
-        name = name_config
-    preferences_config = configuration.get("preferences", {})
-    if not preferences:
-        preferences = preferences_config
-    allergies_config = configuration.get("allergies", [])
-    if not allergies:
-        allergies = allergies_config
-
-    # Default empty preferences and allergies if None
-    if preferences is None:
-        preferences = {}
-    if allergies is None:
-        allergies = []
-
-    customer_data = {
-        "phone_number": phone_number,
-        "name": name,
-        "preferences": preferences,
-        "allergies": allergies,
-    }
-
-    try:
-        # Check if customer exists
-        existing = supabase.table('customers').select('*').eq('phone_number', phone_number).execute()
-        if existing.data:
-            # Update existing customer
-            result = supabase.table('customers').update(customer_data).eq('phone_number', phone_number).execute()
-        else:
-            # Create new customer
-            result = supabase.table('customers').insert(customer_data).execute()
-        return {"success": True, "set_is_registered": True, "message": "Registration completed successfully", **(result.data[0] if result.data else {})}
-    except Exception as e:
-        print(f"Error creating/updating customer: {e}")
-        return {"success": False, "error": str(e), "set_is_registered": False}
+# Registration tools removed - replaced by check_user_registration and collect_registration in waiter agent
 
 
-# --- Registration Agent ---
-load_dotenv()
-llm = ChatOpenAI(model="gpt-4o-mini", api_key=os.getenv("OPENAI_API_KEY"), temperature=0)
 
-registration_agent_prompt = ChatPromptTemplate.from_messages(
-    [
-        (
-            "system",
-            "You are a friendly restaurant waiter helping with customer registration."
-            " Collect phone number, name, preferences, and allergies."
-            
-            "\n\nCRITICAL: NEVER call tools without phone number first!"
-            
-            "\n\nWORKFLOW:"
-            "\n1. Ask for 10-digit phone number (wait for response)"
-            "\n2. Use get_customer tool to check registration"
-            "\n3. Existing customers: Confirm preferences, offer updates, use CompleteOrEscalate"
-            "\n4. New customers: Get name, offer preferences/allergies collection, use CompleteOrEscalate"
-            "\n5. If user wants to skip or asks about menu → mark_registration_complete + CompleteOrEscalate"
-            
-            "\n\nDon't answer menu questions - transfer to waiter immediately after minimum registration."
-        ),
-        ("placeholder", "{messages}"),
-    ]
-)
 
-registration_agent_tools = [get_customer, create_or_update_customer, mark_registration_complete]
-registration_agent_runnable = registration_agent_prompt | llm.bind_tools(registration_agent_tools + [CompleteOrEscalate])
+
+
+# Registration agent removed - waiter agent handles all registration through collect_registration() tool
 
 # --- Tools for Waiter Agent ---
 def place_order(order_details: dict) -> Dict[str, Any]:
@@ -408,6 +261,7 @@ Do not include embedding properties in your response. If you find any embedding 
 Do not respond to any questions that might ask anything else than for you to construct a Cypher statement.
 Do not include any text except the generated Cypher statement.
 Do not use parameters in your queries - always use direct string literals.
+Try to user ingredient name in the where clause instead of dish name.
 
 Examples: Here are a few examples of generated Cypher statements for particular questions:
 1. Do you have paneer based desserts?
@@ -917,6 +771,616 @@ def debug_embedding_indexes() -> Dict[str, Any]:
             "success": False,
             "error": str(e),
             "summary": "Failed to check indexes"
+        }
+
+@tool
+def check_user_registration(config: RunnableConfig, phone_number: str = None) -> Dict[str, Any]:
+    """
+    Check if a user is registered. Use this before actions that require registration.
+    
+    Args:
+        phone_number: Optional phone number to check (will use config if not provided)
+        
+    Returns:
+        Dict with registration status and user information
+    """
+    print(f"[DEBUG] check_user_registration called with phone_number: '{phone_number}'")
+    
+    configuration = config.get("configurable", {})
+    if not phone_number:
+        phone_number = configuration.get("phone_number", None)
+    
+    if not phone_number:
+        return {
+            "is_registered": False,
+            "message": "No phone number available to check registration"
+        }
+    
+    try:
+        response = supabase.table('customers').select('*').eq('phone_number', phone_number).execute()
+        
+        if response.data and len(response.data) > 0:
+            customer = response.data[0]
+            print(f"[DEBUG] User is registered: {customer.get('name')} with phone {phone_number}")
+            return {
+                "is_registered": True,
+                "customer_info": {
+                    "name": customer.get("name"),
+                    "phone_number": phone_number,
+                    "preferences": customer.get("preferences", {}),
+                    "allergies": customer.get("allergies", [])
+                }
+            }
+        else:
+            print(f"[DEBUG] User not registered for phone_number: '{phone_number}'")
+            return {
+                "is_registered": False,
+                "phone_number": phone_number
+            }
+            
+    except Exception as e:
+        print(f"[DEBUG] Error checking registration: {e}")
+        return {
+            "is_registered": False,
+            "error": str(e)
+        }
+
+@tool
+def collect_registration(config: RunnableConfig, phone_number: str, name: str = None) -> Dict[str, Any]:
+    """
+    Collect user registration when needed for specific actions like placing orders or reservations.
+    This should only be called when registration is required for a specific action.
+    
+    Args:
+        phone_number: User's 10-digit phone number
+        name: User's name (optional, will be requested if not provided)
+        
+    Returns:
+        Dict with registration status and user information
+    """
+    print(f"[DEBUG] collect_registration called with phone_number: '{phone_number}', name: '{name}'")
+    
+    if not phone_number or len(phone_number) != 10:
+        return {
+            "success": False,
+            "error": "Please provide a valid 10-digit phone number",
+            "set_is_registered": False
+        }
+    
+    try:
+        # Check if customer already exists
+        existing_customer = supabase.table('customers').select('*').eq('phone_number', phone_number).execute()
+        
+        if existing_customer.data and len(existing_customer.data) > 0:
+            # Customer exists - return their information
+            customer = existing_customer.data[0]
+            print(f"[DEBUG] Found existing customer: {customer.get('name')} with phone {phone_number}")
+            
+            # Update config with customer information
+            configuration = config.get("configurable", {})
+            configuration["phone_number"] = phone_number
+            configuration["name"] = customer.get("name")
+            
+            return {
+                "success": True,
+                "is_existing_customer": True,
+                "set_is_registered": True,
+                "customer_info": {
+                    "name": customer.get("name"),
+                    "phone_number": phone_number,
+                    "preferences": customer.get("preferences", {}),
+                    "allergies": customer.get("allergies", [])
+                },
+                "summary": f"Existing customer - \n\n Customer Name: {customer.get('name')}"
+            }
+        else:
+            # New customer - collect name if not provided
+            if not name:
+                return {
+                    "success": False,
+                    "needs_name": True,
+                    "set_is_registered": False,
+                    # "summary": "Thank you for providing your phone number. And What is your name please?"
+                }
+            
+            # Create new customer record
+            customer_data = {
+                "phone_number": phone_number,
+                "name": name,
+                "preferences": {},
+                "allergies": [],
+            }
+            
+            result = supabase.table('customers').insert(customer_data).execute()
+            
+            if result.data:
+                print(f"[DEBUG] Created new customer: {name} with phone {phone_number}")
+                
+                # Update config with customer information
+                configuration = config.get("configurable", {})
+                configuration["phone_number"] = phone_number
+                configuration["name"] = name
+                
+                return {
+                    "success": True,
+                    "is_existing_customer": False,
+                    "set_is_registered": True,
+                    "customer_info": {
+                        "name": name,
+                        "phone_number": phone_number,
+                        "preferences": {},
+                        "allergies": []
+                    },
+                    "message": f"Thank you, {name}! I've registered you in our system."
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "Failed to register your information. Please try again.",
+                    "set_is_registered": False
+                }
+                
+    except Exception as e:
+        print(f"[DEBUG] Error in collect_registration: {e}")
+        return {
+            "success": False,
+            "error": f"Registration failed: {str(e)}",
+            "set_is_registered": False
+        }
+
+@tool
+def make_reservation(config: RunnableConfig, phone_number: str = None, name: str = None, pax: int = None, date: str = None, time: str = None, conflict_resolution: str = None, **kwargs) -> Dict[str, Any]:
+    """
+    Make a restaurant reservation. Requires user registration first.
+    
+    Args:
+        phone_number: User's 10-digit phone number (required for registration check)
+        name: User's name (required for new customers only)
+        pax: Number of people for the reservation (1-12)
+        date: Reservation date in YYYY-MM-DD format
+        time: Reservation time in HH:MM format (24-hour)
+        conflict_resolution: How to handle conflicts ('proceed', 'update_existing', 'cancel_and_create')
+        
+    Returns:
+        Dict with reservation details and next steps
+    """
+    from datetime import datetime
+    print(f"[DEBUG] make_reservation called with phone_number: '{phone_number}', name: '{name}', pax: {pax}, date: '{date}', time: '{time}'")
+    
+    configuration = config.get("configurable", {})
+    print(f"[DEBUG] make_reservation config phone_number: '{configuration.get('phone_number')}'")
+    
+    # Step 1: Validate phone number and check registration
+    # ENHANCED: Try multiple sources for phone number
+    if not phone_number:
+        phone_number = configuration.get("phone_number", None)
+        print(f"[DEBUG] make_reservation using config phone_number: '{phone_number}'")
+    
+    # If still no phone number, try thread cache
+    if not phone_number:
+        phone_number = get_thread_phone_number(config)
+        print(f"[DEBUG] make_reservation using thread cache phone_number: '{phone_number}'")
+    
+    # If still no phone number, try to extract from kwargs (state might pass it)
+    if not phone_number and kwargs:
+        phone_number = kwargs.get("phone_number", None)
+        print(f"[DEBUG] make_reservation using kwargs phone_number: '{phone_number}'")
+    
+    # Enhanced validation: check if phone number is a string and has exactly 10 digits
+    if not phone_number or not str(phone_number).isdigit() or len(str(phone_number)) != 10:
+        return {
+            "success": False,
+            "step": "phone_number",
+            "message": "To make a reservation, I'll need your 10-digit phone number first. What's your phone number?"
+        }
+    
+    try:
+        # Check if customer exists
+        customer_check = supabase.table('customers').select('*').eq('phone_number', phone_number).execute()
+        
+        if customer_check.data and len(customer_check.data) > 0:
+            # Existing customer
+            customer = customer_check.data[0]
+            customer_name = customer.get('name')
+            customer_phone = customer.get('phone_number')
+            
+            # Update config with customer info
+            configuration["phone_number"] = customer_phone
+            configuration["name"] = customer_name
+            
+            # Cache phone number for this thread
+            set_thread_phone_number(config, customer_phone)
+            
+            print(f"[DEBUG] Found existing customer for reservation: {customer_name}")
+            
+        else:
+            # New customer - need name
+            if not name:
+                return {
+                    "success": False,
+                    "step": "name",
+                    "phone_number": phone_number,
+                    "message": f"I don't have your details for {phone_number}. What's your name so I can register you for the reservation?"
+                }
+            
+            # Register new customer
+            customer_data = {
+                "phone_number": phone_number,
+                "name": name,
+                "preferences": {},
+                "allergies": [],
+            }
+            
+            reg_result = supabase.table('customers').insert(customer_data).execute()
+            if not reg_result.data:
+                return {
+                    "success": False,
+                    "error": "Failed to register customer. Please try again.",
+                    "step": "registration_failed"
+                }
+            
+            customer_name = name
+            customer_phone = phone_number
+            
+            # Update config
+            configuration["phone_number"] = customer_phone
+            configuration["name"] = customer_name
+            
+            # Cache phone number for this thread
+            set_thread_phone_number(config, customer_phone)
+            
+            print(f"[DEBUG] Registered new customer for reservation: {customer_name}")
+        
+        # Step 2: Collect reservation details
+        if not pax:
+            return {
+                "success": False,
+                "step": "pax",
+                "customer_name": customer_name,
+                "message": f"Great, {customer_name}! How many people will be dining with us? (1-12 people)"
+            }
+        
+        if pax < 1 or pax > 12:
+            return {
+                "success": False,
+                "step": "pax",
+                "message": "We can accommodate 1-12 people per reservation. How many people will be dining?"
+            }
+        
+        if not date:
+            return {
+                "success": False,
+                "step": "date",
+                "customer_name": customer_name,
+                "pax": pax,
+                "message": f"Perfect! For {pax} people. What date would you like to make the reservation? (Please provide in YYYY-MM-DD format, e.g., 2024-07-15)"
+            }
+        
+        # Validate date format immediately
+        try:
+            reservation_date = datetime.strptime(date, "%Y-%m-%d").date()
+            today = datetime.now().date()
+            
+            if reservation_date < today:
+                return {
+                    "success": False,
+                    "step": "date",
+                    "message": "Please select a future date for your reservation. What date would you like?"
+                }
+        except ValueError:
+            return {
+                "success": False,
+                "step": "date",
+                "message": "Please provide the date in YYYY-MM-DD format (e.g., 2024-07-15)."
+            }
+        
+        if not time:
+            return {
+                "success": False,
+                "step": "time",
+                "customer_name": customer_name,
+                "pax": pax,
+                "date": date,
+                "message": f"Excellent! For {date}. What time would you prefer? (Please provide in HH:MM format, e.g., 19:30 for 7:30 PM)"
+            }
+        
+        # Validate time format immediately
+        try:
+            reservation_time = datetime.strptime(time, "%H:%M").time()
+            
+            # Check if time is within restaurant hours (11 AM to 10 PM, last seating)
+            open_time = datetime.strptime("11:00", "%H:%M").time()
+            last_seating = datetime.strptime("22:00", "%H:%M").time()
+            
+            if reservation_time < open_time or reservation_time > last_seating:
+                return {
+                    "success": False,
+                    "step": "time",
+                    "message": "We accept reservations between 11:00 AM and 10:00 PM. What time would you prefer?"
+                }
+        except ValueError:
+            return {
+                "success": False,
+                "step": "time", 
+                "message": "Please provide the time in HH:MM format (e.g., 19:30 for 7:30 PM)."
+            }
+        
+        # Step 3: All validations passed, proceed to create reservation
+        # CRITICAL: Only proceed if ALL required fields are explicitly provided by user
+        
+        # Step 3.5: Check for existing reservations on the same date
+        try:
+            # Get all existing reservations for this customer on the requested date
+            existing_reservations = supabase.table('reservations').select('*').eq('cust_number', customer_phone).eq('booking_date', date).execute()
+            
+            if existing_reservations.data:
+                existing_res = existing_reservations.data[0]  # Take the first (most relevant) existing reservation
+                existing_time = existing_res.get('booking_time')
+                existing_id = existing_res.get('id')
+                existing_pax = existing_res.get('pax')
+                
+                # Format existing time for display
+                try:
+                    existing_time_display = datetime.strptime(str(existing_time), "%H:%M").strftime("%I:%M %p")
+                except:
+                    existing_time_display = str(existing_time)
+                
+                # Format date for display
+                try:
+                    display_date = datetime.strptime(date, "%Y-%m-%d").strftime("%B %d, %Y")
+                except:
+                    display_date = date
+                
+                # Check if user has provided conflict resolution
+                if conflict_resolution:
+                    # Handle conflict resolution based on user choice
+                    if str(existing_time) == str(time):  # Same date and time
+                        if conflict_resolution.lower() in ['update', 'update_existing', '1']:
+                            # Update existing reservation
+                            if existing_pax != pax:
+                                update_result = supabase.table('reservations').update({'pax': pax}).eq('id', existing_id).execute()
+                                if update_result.data:
+                                    return {
+                                        "success": True,
+                                        "step": "completed",
+                                        "action": "reservation_updated",
+                                        "set_is_registered": True,
+                                        "reservation_details": {
+                                            "reservation_id": existing_id,
+                                            "customer_name": customer_name,
+                                            "phone_number": customer_phone,
+                                            "pax": pax,
+                                            "date": display_date,
+                                            "time": existing_time_display,
+                                            "status": "updated"
+                                        },
+                                        "summary": f"Successfully updated reservation {existing_id} for {customer_name} on {display_date} at {existing_time_display}. Changed from {existing_pax} to {pax} people."
+                                    }
+                            else:
+                                return {
+                                    "success": True,
+                                    "step": "completed", 
+                                    "action": "reservation_exists",
+                                    "set_is_registered": True,
+                                    "reservation_details": {
+                                        "reservation_id": existing_id,
+                                        "customer_name": customer_name,
+                                        "phone_number": customer_phone,
+                                        "pax": pax,
+                                        "date": display_date,
+                                        "time": existing_time_display,
+                                        "status": "confirmed"
+                                    },
+                                    "summary": f"Your existing reservation {existing_id} for {customer_name} on {display_date} at {existing_time_display} for {pax} people is already confirmed."
+                                }
+                        
+                        elif conflict_resolution.lower() in ['keep', '2']:
+                            # Keep existing reservation as is
+                            return {
+                                "success": True,
+                                "step": "completed",
+                                "action": "reservation_kept",
+                                "set_is_registered": True,
+                                "reservation_details": {
+                                    "reservation_id": existing_id,
+                                    "customer_name": customer_name,
+                                    "phone_number": customer_phone,
+                                    "pax": existing_pax,
+                                    "date": display_date,
+                                    "time": existing_time_display,
+                                    "status": "confirmed"
+                                },
+                                "summary": f"No changes made. Your existing reservation {existing_id} for {customer_name} on {display_date} at {existing_time_display} for {existing_pax} people remains confirmed."
+                            }
+                        
+                        elif conflict_resolution.lower() in ['cancel', 'cancel_and_create', '3']:
+                            # Cancel existing and create new
+                            supabase.table('reservations').delete().eq('id', existing_id).execute()
+                            # Continue to create new reservation below
+                            print(f"[DEBUG] Canceled existing reservation {existing_id} to create new one")
+                        
+                        else:
+                            # Invalid choice, ask again
+                            return {
+                                "success": False,
+                                "step": "existing_reservation_same_time",
+                                "action": "reservation_conflict_same_time",
+                                "existing_reservation": {
+                                    "reservation_id": existing_id,
+                                    "date": display_date,
+                                    "time": existing_time_display,
+                                    "pax": existing_pax
+                                },
+                                "requested_reservation": {
+                                    "date": display_date,
+                                    "time": datetime.strptime(time, "%H:%M").strftime("%I:%M %p"),
+                                    "pax": pax
+                                },
+                                "message": f"I didn't understand your choice. You have a reservation on {display_date} at {existing_time_display} for {existing_pax} people (ID: {existing_id}).\n\nPlease choose:\n1. **Update** - Change to {pax} people\n2. **Keep** - Keep existing reservation\n3. **Cancel** - Cancel existing and create new\n\nPlease type 1, 2, or 3."
+                            }
+                    
+                    else:  # Same date but different time
+                        if conflict_resolution.lower() in ['yes', 'proceed', '1']:
+                            # Create new reservation in addition to existing one
+                            print(f"[DEBUG] User confirmed to create additional reservation on same date")
+                            # Continue to create new reservation below
+                        
+                        elif conflict_resolution.lower() in ['no', '2']:
+                            # Keep only existing reservation
+                            return {
+                                "success": True,
+                                "step": "completed",
+                                "action": "reservation_kept",
+                                "set_is_registered": True,
+                                "reservation_details": {
+                                    "reservation_id": existing_id,
+                                    "customer_name": customer_name,
+                                    "phone_number": customer_phone,
+                                    "pax": existing_pax,
+                                    "date": display_date,
+                                    "time": existing_time_display,
+                                    "status": "confirmed"
+                                },
+                                "summary": f"No new reservation created. Your existing reservation {existing_id} for {customer_name} on {display_date} at {existing_time_display} for {existing_pax} people remains confirmed."
+                            }
+                        
+                        elif conflict_resolution.lower() in ['update', '3']:
+                            # Modify existing reservation to new time and pax
+                            update_data = {'booking_time': time, 'pax': pax}
+                            update_result = supabase.table('reservations').update(update_data).eq('id', existing_id).execute()
+                            if update_result.data:
+                                new_time_display = datetime.strptime(time, "%H:%M").strftime("%I:%M %p")
+                                return {
+                                    "success": True,
+                                    "step": "completed",
+                                    "action": "reservation_updated",
+                                    "set_is_registered": True,
+                                    "reservation_details": {
+                                        "reservation_id": existing_id,
+                                        "customer_name": customer_name,
+                                        "phone_number": customer_phone,
+                                        "pax": pax,
+                                        "date": display_date,
+                                        "time": new_time_display,
+                                        "status": "updated"
+                                    },
+                                    "summary": f"Successfully updated reservation {existing_id} for {customer_name} on {display_date}. Changed from {existing_time_display} to {new_time_display} and from {existing_pax} to {pax} people."
+                                }
+                        
+                        else:
+                            # Invalid choice, ask again
+                            return {
+                                "success": False,
+                                "step": "existing_reservation_different_time",
+                                "action": "reservation_conflict_different_time",
+                                "existing_reservation": {
+                                    "reservation_id": existing_id,
+                                    "date": display_date,
+                                    "time": existing_time_display,
+                                    "pax": existing_pax
+                                },
+                                "requested_reservation": {
+                                    "date": display_date,
+                                    "time": datetime.strptime(time, "%H:%M").strftime("%I:%M %p"),
+                                    "pax": pax
+                                },
+                                "message": f"I didn't understand your choice. You have a reservation on {display_date} at {existing_time_display} for {existing_pax} people (ID: {existing_id}).\n\nYou want another at {datetime.strptime(time, '%H:%M').strftime('%I:%M %p')} for {pax} people.\n\nPlease choose:\n1. **Yes** - Create both reservations\n2. **No** - Keep only existing reservation\n3. **Update** - Modify existing reservation\n\nPlease type 1, 2, or 3."
+                            }
+                
+                else:
+                    # No conflict resolution provided, ask user for choice
+                    if str(existing_time) == str(time):
+                        # Case 1: Same date and time - ask if they want to change existing reservation
+                        return {
+                            "success": False,
+                            "step": "existing_reservation_same_time",
+                            "action": "reservation_conflict_same_time",
+                            "existing_reservation": {
+                                "reservation_id": existing_id,
+                                "date": display_date,
+                                "time": existing_time_display,
+                                "pax": existing_pax
+                            },
+                            "requested_reservation": {
+                                "date": display_date,
+                                "time": datetime.strptime(time, "%H:%M").strftime("%I:%M %p"),
+                                "pax": pax
+                            },
+                            "message": f"I found that you already have a reservation on {display_date} at {existing_time_display} for {existing_pax} people (Reservation ID: {existing_id}).\n\nWould you like me to:\n1. **Update** your existing reservation to {pax} people\n2. **Keep** your existing reservation as is\n3. **Cancel** your existing reservation and create a new one\n\nPlease reply with 1, 2, or 3."
+                        }
+                    
+                    else:
+                        # Case 2: Same date but different time - inform and ask for confirmation
+                        return {
+                            "success": False,
+                            "step": "existing_reservation_different_time",
+                            "action": "reservation_conflict_different_time",
+                            "existing_reservation": {
+                                "reservation_id": existing_id,
+                                "date": display_date,
+                                "time": existing_time_display,
+                                "pax": existing_pax
+                            },
+                            "requested_reservation": {
+                                "date": display_date,
+                                "time": datetime.strptime(time, "%H:%M").strftime("%I:%M %p"),
+                                "pax": pax
+                            },
+                            "message": f"I notice you already have a reservation on {display_date} at {existing_time_display} for {existing_pax} people (Reservation ID: {existing_id}).\n\nYou're now requesting another reservation on the same date at {datetime.strptime(time, '%H:%M').strftime('%I:%M %p')} for {pax} people.\n\nAre you sure you want to make **two separate reservations** on the same day? Please confirm:\n1. **Yes** - Create the new reservation in addition to the existing one\n2. **No** - Keep only the existing reservation\n3. **Update** - Modify the existing reservation instead\n\nPlease reply with 1, 2, or 3."
+                        }
+        
+        except Exception as e:
+            print(f"[DEBUG] Error checking existing reservations: {e}")
+            # Continue with creating the reservation if there's an error checking existing ones
+        
+        # Step 4: Create reservation in database
+        reservation_data = {
+            "cust_number": customer_phone,  # Foreign key to customers table
+            "pax": pax,
+            "booking_date": date,
+            "booking_time": time
+        }
+        
+        reservation_result = supabase.table('reservations').insert(reservation_data).execute()
+        
+        if reservation_result.data:
+            reservation_id = reservation_result.data[0].get('id', 'N/A')
+            
+            # Format time for display
+            display_time = datetime.strptime(time, "%H:%M").strftime("%I:%M %p")
+            display_date = datetime.strptime(date, "%Y-%m-%d").strftime("%B %d, %Y")
+            
+            print(f"[DEBUG] Created reservation {reservation_id} for {customer_name}")
+            
+            return {
+                "success": True,
+                "step": "completed",
+                "action": "reservation_created",
+                "set_is_registered": True,
+                "reservation_details": {
+                    "reservation_id": reservation_id,
+                    "customer_name": customer_name,
+                    "phone_number": customer_phone,
+                    "pax": pax,
+                    "date": display_date,
+                    "time": display_time,
+                    "status": "confirmed"
+                },
+                "summary": f"Successfully created reservation {reservation_id} for {customer_name} on {display_date} at {display_time} for {pax} people. The reservation is confirmed and customer should arrive 10 minutes early."
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Failed to create reservation. Please try again.",
+                "step": "reservation_failed"
+            }
+            
+    except Exception as e:
+        print(f"[DEBUG] Error in make_reservation: {e}")
+        return {
+            "success": False,
+            "error": f"Reservation failed: {str(e)}",
+            "step": "error"
         }
 
 @tool
@@ -1603,6 +2067,44 @@ waiter_agent_prompt = ChatPromptTemplate.from_messages(
             "\n• Be confident and direct: 'Absolutely!' instead of 'It seems that...'"
             "\n• Sound human: 'Let me check our specials' not 'Let me search our menu'"
             
+            "\n\nREGISTRATION REQUIREMENTS:"
+            "\n• MENU BROWSING, RECOMMENDATIONS, INGREDIENT INFO: NO registration needed"
+            "\n• ORDERS, RESERVATIONS, BILLS: Registration REQUIRED"
+            "\n• When registration needed: Use check_user_registration() first"
+            "\n• If not registered: 'To [place order/make reservation], I'll need your phone number first'"
+            "\n• Use collect_registration() tool when customer provides phone number"
+            "\n• Continue conversation naturally after registration"
+            "\n• For menu questions, proceed immediately without asking for registration"
+            
+            "\n\nRESERVATION HANDLING:"
+            "\n• NEW RESERVATIONS: Use make_reservation() tool for reservation requests"
+            "\n• CHECK RESERVATIONS: Use get_reservations() to show customer's bookings"
+            "\n• CANCEL RESERVATIONS: Use cancel_reservation() with reservation ID"
+            "\n• MODIFY RESERVATIONS: Use modify_reservation() with reservation ID and new details"
+            "\n• make_reservation() handles complete flow: registration check + reservation creation"
+            "\n• DON'T use collect_registration() separately for reservations - make_reservation() handles everything"
+            "\n• The reservation tools will guide users step-by-step through each process"
+            "\n• Always verify phone number for reservation management (check/cancel/modify)"
+            "\n• IMPORTANT: Tools return structured data - YOU format the response naturally based on the action and details"
+            "\n• For successful operations, create warm, personal responses using the customer's name and details"
+            "\n• For reservation lists, only present upcoming reservations"
+            "\n• Always mention reservation IDs for future reference and modification options"
+            
+            "\n\nRESERVATION CONFLICT HANDLING:"
+            "\n• CONFLICT DETECTION: make_reservation() automatically checks for existing reservations on the same date"
+            "\n• SAME DATE & TIME: When customer has existing reservation at same date/time, make_reservation() will ask for choice"
+            "\n• SAME DATE, DIFFERENT TIME: When customer has existing reservation on same date but different time, make_reservation() will inform and ask for confirmation"
+            "\n• PARSING USER CHOICE: When user responds to conflict options, use parse_reservation_conflict_response() first"
+            "\n• THEN CALL make_reservation() AGAIN: Use the conflict_resolution parameter from parse_reservation_conflict_response()"
+            "\n• CONFLICT RESOLUTION OPTIONS:"
+            "\n  - 'update_existing' or '1': Update the existing reservation"
+            "\n  - 'keep' or '2': Keep existing reservation, cancel new request"
+            "\n  - 'cancel_and_create' or '3': Cancel existing, create new"
+            "\n  - 'proceed' or '1' (for different times): Create both reservations"
+            "\n  - 'update' or '3' (for different times): Modify existing to new time/pax"
+            "\n• WORKFLOW: make_reservation() → conflict detected → user chooses → parse_reservation_conflict_response() → make_reservation(conflict_resolution=choice)"
+            "\n• BE HELPFUL: Explain options clearly and confirm the final outcome"
+            
             "\n\nCURRENT DATE & TIME: {current_datetime}"
             "\nIMPORTANT: Use this current time to provide accurate, contextual answers about operating hours."
             "\n• If asked 'Are you open now?' - compare current time with operating hours from FAQ tool"
@@ -1611,28 +2113,39 @@ waiter_agent_prompt = ChatPromptTemplate.from_messages(
             "\n• Always be specific: 'We are open from X to Y' and 'We will open/close at Z'"
             
             "\n\nTOOL SELECTION (be efficient):"
-            "\n• Order requests ('I want X') → get_detailed_dish_info(['item1', 'item2']) - single call"
-            "\n• Menu questions ('What do you have') → get_recommendations(query)"
-            "\n• Dish verification ('Do you have X') → check_semantic_similarity first"
-            "\n• Complex searches → extract_food_terms then check_semantic_similarity"
-            "\n• Restaurant info (hours, location, policies) → get_faq_answer(query)"
+            "\n• Menu questions ('What do you have') → get_recommendations(query) - NO registration needed"
+            "\n• Dish verification ('Do you have X') → extract_food_terms(query) THEN check_semantic_similarity(extracted_terms) - NO registration needed"
+            "\n• Complex searches → extract_food_terms(query) THEN check_semantic_similarity(extracted_terms) - NO registration needed"
+            "\n• Order requests ('I want to order') → check_user_registration() → collect_registration() if needed → get_detailed_dish_info()"
+            "\n• NEW RESERVATIONS ('I want to make a reservation') → make_reservation() - handles everything automatically"
+            "\n• CHECK RESERVATIONS ('Show my bookings') → get_reservations() - requires phone number"
+            "\n• CANCEL RESERVATIONS ('Cancel reservation ID 123') → cancel_reservation() - requires ID and phone"
+            "\n• MODIFY RESERVATIONS ('Change reservation ID 123') → modify_reservation() - requires ID, phone, and new details"
+            "\n• Restaurant info (hours, location, policies) → get_faq_answer(query) - NO registration needed"
             
             "\n\nQUESTION ROUTING:"
-            "\n1. MENU QUESTIONS → Use menu tools (get_recommendations, check_semantic_similarity)"
-            "\n2. RESTAURANT INFO → Use get_faq_answer for:"
+            "\n1. MENU QUESTIONS → Use menu tools directly (get_recommendations, check_semantic_similarity)"
+            "\n2. ORDER REQUESTS → Check registration first, then proceed"
+            "\n3. NEW RESERVATION REQUESTS → Use make_reservation() immediately (handles registration + booking)"
+            "\n4. RESERVATION MANAGEMENT → Use appropriate tool:"
+            "\n   - 'Show/check my reservations' → get_reservations()"
+            "\n   - 'Cancel reservation ID X' → cancel_reservation()"
+            "\n   - 'Modify/change reservation ID X' → modify_reservation()"
+            "\n5. RESTAURANT INFO → Use get_faq_answer for:"
             "\n   - Operating hours, timings"
             "\n   - Location, address, directions"
             "\n   - Parking availability, contact info"
             "\n   - Services (delivery, takeaway, reservations)"
             "\n   - Payment methods, policies"
-            "\n3. If unsure → Try menu tools first, then FAQ if no relevant results"
+            "\n6. If unsure → Try menu tools first (no registration barrier)"
             
             "\n\nCRITICAL: EXACT DISH VERIFICATION"
             "\nWhen users ask about specific dishes:"
-            "\n1. Check if we have the EXACT dish name"
+            "\n1. Check if we have the EXACT dish name (NO registration needed)"
             "\n2. If YES → Answer about our dish"
             "\n3. If NO → 'We don't have [THEIR DISH] but we do have [OUR SIMILAR DISH]'"
             "\n4. NEVER pretend we have dishes we don't serve"
+            "\n5. Only ask for registration when they want to ORDER, not when browsing"
             
             "\n\nFORMATTING:"
             "\n• Multiple items with details → Use markdown tables"
@@ -1642,19 +2155,41 @@ waiter_agent_prompt = ChatPromptTemplate.from_messages(
             
             "\n\nOPTIMIZATION HINTS:"
             "\n• optimization_hint='direct_menu_query' → Use get_recommendations"
-            "\n• optimization_hint='order_request' → Use get_detailed_dish_info directly"
+            "\n• optimization_hint='order_request' → Use check_user_registration first"
             "\n• optimization_hint='faq_query' → Use get_faq_answer directly"
             
             "\n\nEXAMPLES WITH NATURAL RESPONSES:"
-            "\n'I want butter chicken and naan' → get_detailed_dish_info → 'Excellent choice! Our Butter Chicken is...'"
-            "\n'Do you have Fish Curry?' → check_semantic_similarity → 'Yes, we have Fish Curry' OR 'We don't have Fish Curry, but our Prawn Curry is similar'"
+            "\n'What veg starters do you have?' → get_recommendations → 'We have some wonderful vegetarian appetizers like...'"
+            "\n'Do you have Fish Curry?' → extract_food_terms('Do you have Fish Curry?') → check_semantic_similarity(extracted_terms=result) → 'Yes, we have Fish Curry' OR 'We don't have Fish Curry, but our Prawn Curry is similar'"
+            "\n'I want to order butter chicken and naan' → check_user_registration → collect_registration (if needed) → get_detailed_dish_info → 'Excellent choice! Let me get your order ready...'"
+            "\n'I want to make a reservation' → make_reservation() → 'I'd be happy to help you make a reservation! What's your phone number?'"
+            "\n'Can I book a table for 4 people?' → make_reservation() → 'Absolutely! Let me help you book a table. What's your phone number?'"
+            "\n'Show me my reservations' → get_reservations() → 'Let me check your reservations. What's your phone number?'"
+            "\n'Check my bookings' → get_reservations() → 'I'll pull up your reservations. What's your phone number?'"
+            "\n'Cancel reservation ID 123' → cancel_reservation() → 'I can help you cancel that reservation. Let me verify your phone number first.'"
+            "\n'Change my reservation to 6 people' → modify_reservation() → 'I can help modify your reservation. What's the reservation ID and your phone number?'"
             "\n'Do you serve non-veg?' → get_recommendations → 'Absolutely! We have a great selection of chicken, mutton, and seafood dishes. What type of non-veg are you in the mood for?'"
-            "\n'What veg starters?' → get_recommendations → 'We have some wonderful vegetarian appetizers like...'"
             "\n'What are your timings?' → get_faq_answer → 'We're open from 11 AM to 11 PM every day'"
             "\n'Are you open now?' at 2:30 AM → 'We're currently closed. We'll be open again at 11 AM'"
             "\n'Where are you located?' → get_faq_answer → 'We're located at [address]. It's easy to find with plenty of parking'"
             
-            "\n\nAvailable tools: extract_food_terms, check_semantic_similarity, get_detailed_dish_info, get_recommendations, get_faq_answer, debug_embedding_indexes, CompleteOrEscalate"
+            "\n\nSTRUCTURED TOOL RESPONSE FORMATTING:"
+            "\n• Tools now return structured data (action, details, summary) - YOU format responses naturally"
+            "\n• action='reservation_created' → 'Fantastic! I've confirmed your reservation for [date] at [time]...'"
+            "\n• action='reservations_retrieved' → 'Hello [name]! I found your reservations...'"
+            "\n• action='reservation_canceled' → 'Done! I've canceled your reservation [id]...'"
+            "\n• action='reservation_updated' → 'Perfect! I've updated your reservation...'"
+            "\n• NEVER just repeat the tool's summary - create warm, personal responses"
+            
+            "\n\nCRITICAL: TOOL CHAINING FOR DISH SEARCHES"
+            "\n• ALWAYS use extract_food_terms(query) FIRST, then check_semantic_similarity(extracted_terms=result)"
+            "\n• NEVER call check_semantic_similarity without the extracted_terms parameter"
+            "\n• Example: User asks 'Do you have Galawati Kebab?'"
+            "\n  1. Call extract_food_terms('Do you have Galawati Kebab?')"
+            "\n  2. Call check_semantic_similarity(extracted_terms=<result from step 1>)"
+            "\n  3. Format response based on similarity results"
+            
+            "\n\nAvailable tools: extract_food_terms, check_semantic_similarity, get_detailed_dish_info, get_recommendations, get_faq_answer, debug_embedding_indexes, check_user_registration, collect_registration, make_reservation, get_reservations, cancel_reservation, modify_reservation, parse_reservation_conflict_response"
             
             "\n\nPersonalization: {user_info}"
         ),
@@ -1662,8 +2197,7 @@ waiter_agent_prompt = ChatPromptTemplate.from_messages(
     ]
 )
 
-waiter_agent_tools = [extract_food_terms, check_semantic_similarity, get_recommendations, get_detailed_dish_info, get_faq_answer, debug_embedding_indexes]
-waiter_agent_runnable = waiter_agent_prompt | llm.bind_tools(waiter_agent_tools + [CompleteOrEscalate])
+# waiter_agent_tools will be defined at the very end of the file after all tools
 
 
 
@@ -1672,218 +2206,15 @@ from typing import Callable
 from langchain_core.messages import ToolMessage
 
 
-def create_entry_node(assistant_name: str, new_dialog_state: str) -> Callable:
-    def entry_node(state: State) -> dict:
-        messages = []
-        
-        # For registration agent, always provide clear guidance
-        if new_dialog_state == "registration_agent":
-            from langchain_core.messages import SystemMessage
-            messages.append(
-                SystemMessage(
-                    content=f"You are now the {assistant_name}. The user has provided their phone number. "
-                    "Check if they are registered using the get_customer tool with the phone number they provided. "
-                    "Follow the registration process step by step as described in your system prompt."
-                )
-            )
-        else:
-            # For other agents, use the original logic
-            last_message = state["messages"][-1]
-            if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
-                tool_call_id = last_message.tool_calls[0]["id"]
-                messages.append(
-                    ToolMessage(
-                        content=f"The assistant is now the {assistant_name}. Reflect on the above conversation between the host assistant and the user."
-                        f" The user's intent is unsatisfied. Use the provided tools to assist the user. Remember, you are {assistant_name},"
-                        " and the booking, update, other other action is not complete until after you have successfully invoked the appropriate tool."
-                        " If the user changes their mind or needs help for other tasks, call the CompleteOrEscalate function to let the primary host assistant take control."
-                        " Do not mention who you are - just act as the proxy for the assistant.",
-                        tool_call_id=tool_call_id,
-                    )
-                )
-        
-        return {
-            "messages": messages,
-            "dialog_state": new_dialog_state,
-        }
-
-    return entry_node
+# create_entry_node removed - no longer needed without separate registration agent
 
 
-# --- Graphs ---
+# --- Single Agent Graph - Waiter agent handles everything ---
 
-def check_registration_node(state, config):
-    # This node doesn't modify state, just used for routing
-    # print(f"[DEBUG] check_registration_node: is_registered = {state.get('is_registered', False)}")
-    return state
+# Start directly with waiter agent - it handles all functionality including registration when needed
+builder.add_edge(START, "waiter_agent")
 
-builder.add_node("check_registration", check_registration_node)
-builder.add_edge(START, "check_registration")
-
-def check_registration_condition(state):
-    is_registered = state.get("is_registered", False)
-    print(f"[DEBUG] check_registration_condition: is_registered = {is_registered}")
-    if is_registered:
-        print("[DEBUG] Routing to waiter_agent")
-        return "waiter_agent"
-    else:
-        print("[DEBUG] Routing to registration_agent")
-        return "registration_agent"
-
-builder.add_conditional_edges(
-    "check_registration",
-    check_registration_condition,
-    {
-        "registration_agent": "registration_agent",
-        "waiter_agent": "waiter_agent"
-    }
-)
-
-# builder.add_node(
-#     "enter_registration_agent",
-#     create_entry_node("Registration Assistant", "registration_agent"),
-# )
-def registration_agent_with_debug(state: State, config: RunnableConfig):
-    print(f"[DEBUG] registration_agent called with {len(state.get('messages', []))} messages")
-    print(f"[DEBUG] registration_agent is_registered = {state.get('is_registered', False)}")
-    agent = Assistant(registration_agent_runnable)
-    return agent(state, config)
-
-builder.add_node("registration_agent", registration_agent_with_debug)
-
-# Create a custom tool node that handles state updates
-def registration_tools_node(state: State):
-    """Custom tool node that updates registration status based on tool results"""
-    # Check if we're blocking a CompleteOrEscalate due to incomplete registration
-    last_message = state["messages"][-1] if state["messages"] else None
-    is_registered = state.get("is_registered", False)
-    
-    if (last_message and hasattr(last_message, 'tool_calls') and last_message.tool_calls and 
-        any(tc["name"] == CompleteOrEscalate.__name__ for tc in last_message.tool_calls) and 
-        not is_registered):
-        
-        # Block the CompleteOrEscalate tool call but preserve any message content
-        from langchain_core.messages import ToolMessage, AIMessage
-        
-        # Create a tool message saying the escalation was blocked
-        blocked_messages = []
-        for tc in last_message.tool_calls:
-            if tc["name"] == CompleteOrEscalate.__name__:
-                blocked_messages.append(
-                    ToolMessage(
-                        content="Registration must be completed first. Please provide your phone number to continue.",
-                        tool_call_id=tc["id"],
-                    )
-                )
-        
-        return {
-            "messages": blocked_messages,
-            "is_registered": is_registered
-        }
-    
-    # Call the standard tool node for other cases
-    tool_node = create_tool_node_with_fallback(registration_agent_tools)
-    result = tool_node.invoke(state)
-    
-    # Check if any tool results indicate registration status change
-    new_is_registered = state.get("is_registered", False)
-    
-    if "messages" in result:
-        for message in result["messages"]:
-            if hasattr(message, 'content'):
-                content = str(message.content)
-                
-                # Check for various patterns that indicate registration status
-                if "set_is_registered" in content:
-                    if "true" in content.lower() or "'registered': true" in content.lower():
-                        new_is_registered = True
-                    elif "false" in content.lower() or "'registered': false" in content.lower():
-                        new_is_registered = False
-                
-                # Also check for success patterns
-                if "'success': true" in content.lower() or '"success": true' in content.lower():
-                    new_is_registered = True
-                
-                # Check for registration completion messages
-                if "registration marked complete" in content.lower() or "registration completed successfully" in content.lower():
-                    new_is_registered = True
-    
-    return {
-        **result,
-        "is_registered": new_is_registered
-    }
-
-builder.add_node("registration_tools", registration_tools_node)
-
-
-
-
-# Add transition node
-def transition_to_waiter_node(state: State) -> dict:
-    """Transition from registration to waiter agent after successful registration"""
-    print("[DEBUG] Transitioning to waiter agent after successful registration")
-    
-    # Handle any pending CompleteOrEscalate tool calls
-    messages = []
-    if state["messages"]:
-        last_message = state["messages"][-1]
-        if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
-            # Create tool responses for any CompleteOrEscalate calls
-            for tc in last_message.tool_calls:
-                if tc["name"] == CompleteOrEscalate.__name__:
-                    from langchain_core.messages import ToolMessage
-                    messages.append(
-                        ToolMessage(
-                            content="Registration completed successfully. You are now connected to our menu assistant.",
-                            tool_call_id=tc["id"],
-                        )
-                    )
-    
-    return {
-        "dialog_state": "waiter_agent",
-        "messages": messages
-    }
-
-builder.add_node("transition_to_waiter", transition_to_waiter_node)
-builder.add_edge("transition_to_waiter", "waiter_agent")
-
-builder.add_edge("registration_tools", "registration_agent")
-
-# Simplified registration routing - similar to waiter agent
-def registration_route_condition(state: State):
-    is_registered = state.get("is_registered", False)
-    route = tools_condition(state)
-    
-    # Check for CompleteOrEscalate tool calls
-    if state["messages"] and hasattr(state["messages"][-1], 'tool_calls') and state["messages"][-1].tool_calls:
-        tool_calls = state["messages"][-1].tool_calls
-        did_cancel = any(tc["name"] == CompleteOrEscalate.__name__ for tc in tool_calls)
-        
-        if did_cancel and is_registered:
-            print("[DEBUG] CompleteOrEscalate with registered user - transitioning to waiter")
-            return "transition_to_waiter"
-        elif did_cancel and not is_registered:
-            print("[DEBUG] CompleteOrEscalate blocked - user not registered")
-            return "registration_tools"  # Block the escalation
-    
-    # Standard tool routing
-    if route == "tools":
-        return "registration_tools"
-    else:
-        # FIXED: Don't auto-transition just because user is registered
-        # Only transition when registration agent explicitly calls CompleteOrEscalate
-        print(f"[DEBUG] Registration agent ending turn - waiting for user input (is_registered={is_registered})")
-        return END
-
-builder.add_conditional_edges(
-    "registration_agent", 
-    registration_route_condition,
-    {
-        "registration_tools": "registration_tools",
-        "transition_to_waiter": "transition_to_waiter", 
-        END: END
-    }
-)
+# Registration graph nodes removed - waiter agent handles registration directly
 
 
 
@@ -1896,9 +2227,15 @@ class ReactWaiterAgent(Assistant):
         waiter_start = time.time()
         print(f"[TIMING] ReactWaiterAgent started processing")
         
-        # Extract user info from config or state
+        # Extract user info from config or state - prioritize state phone number
         configuration = config.get("configurable", {})
-        phone_number = configuration.get("phone_number", None)
+        phone_number = state.get("phone_number") or configuration.get("phone_number", None)
+        
+        # Update config with phone number from state for tool persistence
+        # CRITICAL: Update the actual config object, not just the local copy
+        if phone_number and phone_number != configuration.get("phone_number"):
+            config["configurable"]["phone_number"] = phone_number
+            print(f"[DEBUG] Updated actual config object with phone number from state: {phone_number}")
         
         # Create user_info from available data
         user_info = f"Phone: {phone_number}" if phone_number else "No user info available"
@@ -1925,10 +2262,33 @@ class ReactWaiterAgent(Assistant):
                 'menu', 'dish', 'food', 'items', 'options', 'varieties'
             ]
             
-            # For order/confirmation requests, be more direct
+            # For order/confirmation requests, check registration
             order_patterns = [
-                'i want', 'i would like', 'can i have', 'please get me', 'order',
-                'i\'ll have', 'give me', 'i need', 'can you bring'
+                'i want to order', 'i would like to order', 'can i order', 'place order',
+                'i\'ll order', 'order for me', 'i need to order', 'make an order'
+            ]
+            
+            # For reservation requests, use make_reservation tool
+            reservation_patterns = [
+                'reservation', 'book a table', 'reserve', 'table for', 'make a booking',
+                'i want to book', 'can i book', 'table booking', 'dinner reservation',
+                'lunch reservation', 'book table'
+            ]
+            
+            # For reservation management requests
+            check_reservation_patterns = [
+                'check my reservations', 'show my bookings', 'my reservations', 'check my bookings',
+                'see my reservations', 'view my bookings', 'do i have any reservations'
+            ]
+            
+            cancel_reservation_patterns = [
+                'cancel reservation', 'cancel my booking', 'delete reservation', 'remove booking',
+                'cancel id', 'cancel booking id'
+            ]
+            
+            modify_reservation_patterns = [
+                'change reservation', 'modify booking', 'update reservation', 'reschedule booking',
+                'change my booking', 'modify my reservation', 'edit reservation'
             ]
             
             if any(pattern in user_query for pattern in simple_patterns):
@@ -1936,9 +2296,22 @@ class ReactWaiterAgent(Assistant):
                 # Add a hint to the agent to be more direct
                 state_with_user_info["optimization_hint"] = "direct_menu_query"
             elif any(pattern in user_query for pattern in order_patterns):
-                print(f"[DEBUG] Detected order request, optimizing for multi-item processing")
+                print(f"[DEBUG] Detected order request, checking registration")
                 # Add a hint for order processing
                 state_with_user_info["optimization_hint"] = "order_request"
+            elif any(pattern in user_query for pattern in reservation_patterns):
+                print(f"[DEBUG] Detected reservation request, using make_reservation tool")
+                # Add a hint for reservation processing
+                state_with_user_info["optimization_hint"] = "reservation_request"
+            elif any(pattern in user_query for pattern in check_reservation_patterns):
+                print(f"[DEBUG] Detected check reservations request")
+                state_with_user_info["optimization_hint"] = "check_reservations"
+            elif any(pattern in user_query for pattern in cancel_reservation_patterns):
+                print(f"[DEBUG] Detected cancel reservation request")
+                state_with_user_info["optimization_hint"] = "cancel_reservation"
+            elif any(pattern in user_query for pattern in modify_reservation_patterns):
+                print(f"[DEBUG] Detected modify reservation request")
+                state_with_user_info["optimization_hint"] = "modify_reservation"
         
         result = super().__call__(state_with_user_info, config)
         
@@ -1947,38 +2320,129 @@ class ReactWaiterAgent(Assistant):
         
         return result
 
+# Custom waiter tools node that handles registration state updates
+def waiter_tools_node(state: State):
+    """Custom tool node for waiter agent that handles registration state updates and phone number persistence"""
+    # ENHANCED: Pass phone number from state to tools for persistence
+    # Before calling the tool node, check if we have a phone number in state
+    phone_number_from_state = state.get("phone_number")
+    
+    if phone_number_from_state:
+        print(f"[DEBUG] waiter_tools_node found phone number in state: {phone_number_from_state}")
+        # We need to inject the phone number into the tool calls
+        # This is a bit tricky with LangGraph's tool system, so let's add it to the state context
+        # that tools can access
+        enhanced_state = {
+            **state,
+            "_phone_number_context": phone_number_from_state  # Add context for tools
+        }
+    else:
+        enhanced_state = state
+    
+    # Call the standard tool node
+    tool_node = create_tool_node_with_fallback(waiter_agent_tools)
+    result = tool_node.invoke(enhanced_state)
+    
+    # Check if any tool results indicate registration status change
+    new_is_registered = state.get("is_registered", False)
+    
+    # Track phone number extraction for persistence
+    extracted_phone_number = None
+    
+    if "messages" in result:
+        for message in result["messages"]:
+            if hasattr(message, 'content'):
+                content = str(message.content)
+                
+                # Extract phone numbers from tool results for session persistence
+                import re
+                # Look for phone number patterns in tool results
+                phone_patterns = [
+                    r"phone[_\s]*number['\"]?:\s*['\"]?(\d{10})",
+                    r"'phone_number':\s*'(\d{10})'",
+                    r'"phone_number":\s*"(\d{10})"',
+                    r"customer_info.*phone_number.*?(\d{10})",
+                    r"Hello\s+([A-Za-z]+)!\s+Here are your reservations"  # Extract from successful reservation queries
+                ]
+                
+                for pattern in phone_patterns:
+                    phone_match = re.search(pattern, content, re.IGNORECASE)
+                    if phone_match:
+                        extracted_phone_number = phone_match.group(1)
+                        print(f"[DEBUG] Extracted phone number from tool result: {extracted_phone_number}")
+                        break
+                
+                # Check for registration completion patterns
+                if "set_is_registered" in content:
+                    if "true" in content.lower() or "'set_is_registered': true" in content.lower():
+                        new_is_registered = True
+                        print(f"[DEBUG] Registration status updated to True via tool result")
+                    elif "false" in content.lower() or "'set_is_registered': false" in content.lower():
+                        new_is_registered = False
+                        print(f"[DEBUG] Registration status updated to False via tool result")
+                
+                # Also check for success patterns from collect_registration
+                if ("'success': true" in content.lower() or '"success": true' in content.lower()) and "collect_registration" in str(message):
+                    new_is_registered = True
+                    print(f"[DEBUG] Registration completed via collect_registration tool")
+                
+                # Check for success patterns from make_reservation
+                if ("'success': true" in content.lower() or '"success": true' in content.lower()) and "make_reservation" in str(message):
+                    new_is_registered = True
+                    print(f"[DEBUG] Registration completed via make_reservation tool")
+                
+                # Check for successful reservation operations (get/cancel/modify) to extract phone numbers
+                if any(pattern in content.lower() for pattern in ["hello", "reservations:", "reservation id", "confirmed", "updated successfully", "canceled successfully"]):
+                    # Look for tool calls in the last user message to extract phone number
+                    if state.get("messages"):
+                        recent_messages = state["messages"][-3:]  # Check last few messages
+                        for msg in recent_messages:
+                            if hasattr(msg, 'content') and msg.content:
+                                # Look for 10-digit numbers in recent user messages
+                                phone_match = re.search(r'\b(\d{10})\b', str(msg.content))
+                                if phone_match:
+                                    extracted_phone_number = phone_match.group(1)
+                                    print(f"[DEBUG] Extracted phone number from recent user message: {extracted_phone_number}")
+                                    break
+    
+    # Create the result with phone number persistence
+    result_dict = {
+        **result,
+        "is_registered": new_is_registered
+    }
+    
+    # Add phone number to state if extracted
+    if extracted_phone_number:
+        result_dict["phone_number"] = extracted_phone_number
+        print(f"[DEBUG] Storing phone number {extracted_phone_number} in state for persistence")
+        
+        # ENHANCED: Also cache the phone number for the current thread
+        try:
+            # We need to get the config from somewhere - let's try to extract it from the state context
+            # Since we can't easily get the config here, we'll set up a mechanism to pass it
+            # For now, we'll use a global thread-local storage approach
+            print(f"[DEBUG] Should cache phone number {extracted_phone_number} but need config access")
+        except Exception as e:
+            print(f"[DEBUG] Error caching phone number: {e}")
+    
+    return result_dict
+
 # Wrap waiter agent with ReAct logic
 def waiter_agent_with_debug(state: State, config: RunnableConfig):
-    # BULLETPROOF REGISTRATION CHECK - Block waiter agent if not registered
-    is_registered = state.get("is_registered", False)
-    print(f"[DEBUG] waiter_agent called, is_registered = {is_registered}")
+    print(f"[DEBUG] waiter_agent called with {len(state.get('messages', []))} messages")
+    print(f"[DEBUG] waiter_agent is_registered = {state.get('is_registered', False)}")
     
-    if not is_registered:
-        print("[DEBUG] BLOCKING waiter agent - user not registered")
-        from langchain_core.messages import AIMessage
-        # Force the agent to ask for registration instead of answering menu questions
-        return {
-            "messages": [AIMessage(content="I'd be happy to help you with our menu! However, first, may I please have your 10-digit phone number? This will help me provide you with personalized service and assistance.")]
-        }
+    # NO LONGER BLOCK - waiter agent can handle menu questions without registration
+    # Only check registration when tools need it (handled in tools themselves)
     
     # Ensure system is initialized before processing menu queries
     ensure_system_initialized()
-    
-    # Check if this is the first time waiter agent is called (after registration)
-    messages = state.get("messages", [])
-    if messages and any("Registration completed successfully" in str(msg.content) for msg in messages if hasattr(msg, 'content')):
-        # This is a transition from registration - provide a welcome message
-        from langchain_core.messages import AIMessage
-        print("[DEBUG] First time waiter agent - providing welcome message")
-        return {
-            "messages": [AIMessage(content="Perfect! Your registration is now complete. I'm here to help you explore our delicious menu. What would you like to know about our dishes today? You can ask me about specific items, ingredients, dietary options, or I can recommend something based on your preferences!")]
-        }
     
     react_agent = ReactWaiterAgent(waiter_agent_runnable)
     return react_agent(state, config)
 
 builder.add_node("waiter_agent", waiter_agent_with_debug)
-builder.add_node("waiter_tools", create_tool_node_with_fallback(waiter_agent_tools))
+builder.add_node("waiter_tools", waiter_tools_node)
 builder.add_conditional_edges(
     "waiter_agent",
     tools_condition,
@@ -2004,45 +2468,24 @@ except Exception:
 
 import uuid
 
-def run_command_line_interface():
-    """Run the command-line chat interface"""
-    print("🔄 Initializing system for command-line interface...")
-    
-    # Initialize system first
-    init_result = ensure_system_initialized()
-    if not init_result["success"]:
-        print(f"❌ Failed to initialize system: {init_result.get('error', 'Unknown error')}")
-        print("⚠️ Some features may not work properly. Continuing anyway...")
-    
-    thread_id = str(uuid.uuid4())
-    config = {
-        "configurable": {
-            "phone_number": None,
-            "thread_id": thread_id,
-        }
-    }
+# Thread-based phone number cache for persistence across tool calls
+_thread_phone_cache = {}
 
-    # --- Chat loop ---
-    from langchain_core.messages import HumanMessage
+def get_thread_phone_number(config: RunnableConfig) -> str:
+    """Get phone number for current thread from cache"""
+    thread_id = config.get("configurable", {}).get("thread_id")
+    if thread_id and thread_id in _thread_phone_cache:
+        phone = _thread_phone_cache[thread_id]
+        print(f"[DEBUG] Retrieved cached phone number for thread {thread_id}: {phone}")
+        return phone
+    return None
 
-    state = {"messages": [], "is_registered": False}
-    print("Welcome to Neemsi! Please provide your phone number to help you further!")
-    while True:
-        user_input = input("You: ")
-        if user_input.strip().lower() == "exit":
-            print("Goodbye!")
-            break
-        state["messages"].append(HumanMessage(content=user_input))
-        result = graph.invoke(state, config)
-        # result["messages"] is a list of messages, get the last one
-        assistant_message = result["messages"][-1]
-        print(f"Assistant: {assistant_message.content}")
-        # Update state with the new messages
-        state = result
-
-# Only run the command line interface if this script is executed directly
-if __name__ == "__main__":
-    run_command_line_interface()
+def set_thread_phone_number(config: RunnableConfig, phone_number: str):
+    """Cache phone number for current thread"""
+    thread_id = config.get("configurable", {}).get("thread_id")
+    if thread_id and phone_number:
+        _thread_phone_cache[thread_id] = phone_number
+        print(f"[DEBUG] Cached phone number for thread {thread_id}: {phone_number}")
 
 # Add startup initialization
 def initialize_restaurant_system():
@@ -2052,7 +2495,7 @@ def initialize_restaurant_system():
     """
     init_start = time.time()
     print("\n" + "="*60)
-    print("🚀 INITIALIZING NEEMSI RESTAURANT SYSTEM")
+    print("🚀 INITIALIZING RESTAURANT SYSTEM")
     print("="*60)
     
     try:
@@ -2160,5 +2603,546 @@ def ensure_system_initialized():
     else:
         print("🔄 System already initialized - ready to serve!")
         return {"success": True, "message": "System already initialized"}
+
+def run_command_line_interface():
+    """Run the command-line chat interface"""
+    print("🔄 Initializing system for command-line interface...")
+    
+    # Initialize system first
+    init_result = ensure_system_initialized()
+    if not init_result["success"]:
+        print(f"❌ Failed to initialize system: {init_result.get('error', 'Unknown error')}")
+        print("⚠️ Some features may not work properly. Continuing anyway...")
+    
+    thread_id = str(uuid.uuid4())
+    config = {
+        "configurable": {
+            "phone_number": None,
+            "thread_id": thread_id,
+        }
+    }
+
+    # --- Chat loop ---
+    from langchain_core.messages import HumanMessage
+
+    state = {"messages": [], "is_registered": False, "phone_number": None}
+    print("Welcome to My Restaurant! Feel free to browse our menu and ask about our dishes. Registration is only needed when placing orders or making reservations.")
+    while True:
+        user_input = input("You: ")
+        if user_input.strip().lower() == "exit":
+            print("Goodbye!")
+            break
+        state["messages"].append(HumanMessage(content=user_input))
+        result = graph.invoke(state, config)
+        # result["messages"] is a list of messages, get the last one
+        assistant_message = result["messages"][-1]
+        print(f"Assistant: {assistant_message.content}")
+        # Update state with the new messages
+        state = result
+
+@tool
+def get_reservations(config: RunnableConfig, phone_number: str = None, **kwargs) -> Dict[str, Any]:
+    """
+    Get all reservations for a customer by phone number.
+    
+    Args:
+        phone_number: User's 10-digit phone number
+        
+    Returns:
+        Dict with reservation details or error message
+    """
+    from datetime import datetime
+    print(f"[DEBUG] get_reservations called with phone_number: '{phone_number}'")
+    
+    configuration = config.get("configurable", {})
+    if not phone_number:
+        phone_number = configuration.get("phone_number", None)
+    
+    # Try thread cache if still no phone number
+    if not phone_number:
+        phone_number = get_thread_phone_number(config)
+        print(f"[DEBUG] get_reservations using thread cache phone_number: '{phone_number}'")
+    
+    if not phone_number or len(phone_number) != 10:
+        return {
+            "success": False,
+            "message": "To check your reservations, I'll need your 10-digit phone number. What's your phone number?"
+        }
+    
+    try:
+        # Check if customer exists
+        customer_check = supabase.table('customers').select('name').eq('phone_number', phone_number).execute()
+        
+        if not customer_check.data:
+            return {
+                "success": False,
+                "message": f"I don't have any customer record for {phone_number}. Please check your phone number or register first."
+            }
+        
+        customer_name = customer_check.data[0].get('name')
+        
+        # Cache phone number for this thread since it was successfully used
+        set_thread_phone_number(config, phone_number)
+        
+        # Get all reservations for this customer, ordered by date
+        reservations_result = supabase.table('reservations').select('*').eq('cust_number', phone_number).order('booking_date', desc=False).execute()
+        
+        if not reservations_result.data:
+            return {
+                "success": True,
+                "action": "no_reservations_found",
+                "customer_name": customer_name,
+                "reservations": [],
+                "upcoming_count": 0,
+                # "past_count": 0,
+                "summary": f"{customer_name} has no reservations on record. This could be a good opportunity to make a new reservation."
+            }
+        
+        # Format reservations for display
+        formatted_reservations = []
+        current_date = datetime.now().date()
+        
+        for reservation in reservations_result.data:
+            try:
+                booking_date = datetime.strptime(reservation['booking_date'], "%Y-%m-%d").date()
+                booking_time = reservation.get('booking_time', 'No time specified')
+                
+                # Format time for display if it's in HH:MM format
+                if booking_time and ':' in str(booking_time):
+                    try:
+                        time_obj = datetime.strptime(str(booking_time), "%H:%M").time()
+                        display_time = time_obj.strftime("%I:%M %p")
+                    except:
+                        display_time = str(booking_time)
+                else:
+                    display_time = str(booking_time)
+                
+                # Determine status based on date
+                if booking_date < current_date:
+                    status = "Completed"
+                else:
+                    status = "Confirmed"
+                
+                formatted_reservations.append({
+                    "reservation_id": reservation['id'],
+                    "date": booking_date.strftime("%B %d, %Y"),
+                    "time": display_time,
+                    "pax": reservation['pax'],
+                    "status": status,
+                    "is_upcoming": booking_date >= current_date
+                })
+                
+            except Exception as e:
+                print(f"[DEBUG] Error formatting reservation {reservation.get('id')}: {e}")
+                # Include malformed reservations with basic info
+                formatted_reservations.append({
+                    "reservation_id": reservation['id'],
+                    "date": str(reservation['booking_date']),
+                    "time": str(reservation.get('booking_time', 'No time')),
+                    "pax": reservation['pax'],
+                    "status": "Unknown",
+                    "is_upcoming": False
+                })
+        
+        # Separate upcoming and past reservations
+        upcoming = [r for r in formatted_reservations if r['is_upcoming']]
+        # past = [r for r in formatted_reservations if not r['is_upcoming']]
+        
+        # Create summary for LLM to format naturally
+        return {
+            "success": True,
+            "action": "reservations_retrieved",
+            "customer_name": customer_name,
+            "reservations": formatted_reservations,
+            "upcoming_reservations": upcoming,
+            # "past_reservations": past,
+            "upcoming_count": len(upcoming),
+            # "past_count": len(past),
+            "summary": f"Retrieved {len(formatted_reservations)} total reservations for {customer_name}: {len(upcoming)} upcoming reservations."
+        }
+        
+    except Exception as e:
+        print(f"[DEBUG] Error in get_reservations: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "message": f"I encountered an error while checking your reservations: {str(e)}"
+        }
+
+@tool
+def cancel_reservation(config: RunnableConfig, reservation_id: int = None, phone_number: str = None) -> Dict[str, Any]:
+    """
+    Cancel a reservation by ID. Requires phone number verification.
+    
+    Args:
+        reservation_id: The reservation ID to cancel
+        phone_number: User's phone number for verification
+        
+    Returns:
+        Dict with cancellation status and details
+    """
+    from datetime import datetime
+    print(f"[DEBUG] cancel_reservation called with reservation_id: {reservation_id}, phone_number: '{phone_number}'")
+    
+    configuration = config.get("configurable", {})
+    if not phone_number:
+        phone_number = configuration.get("phone_number", None)
+    
+    # Try thread cache if still no phone number
+    if not phone_number:
+        phone_number = get_thread_phone_number(config)
+        print(f"[DEBUG] cancel_reservation using thread cache phone_number: '{phone_number}'")
+    
+    if not reservation_id:
+        return {
+            "success": False,
+            "message": "To cancel a reservation, I need the reservation ID. Which reservation would you like to cancel?"
+        }
+    
+    if not phone_number or len(phone_number) != 10:
+        return {
+            "success": False,
+            "message": "To cancel a reservation, I need to verify your phone number. What's your 10-digit phone number?"
+        }
+    
+    try:
+        # Get the reservation and verify ownership
+        reservation_result = supabase.table('reservations').select('*').eq('id', reservation_id).eq('cust_number', phone_number).execute()
+        
+        if not reservation_result.data:
+            return {
+                "success": False,
+                "message": f"I couldn't find reservation ID {reservation_id} for your phone number. Please check the reservation ID and try again."
+            }
+        
+        reservation = reservation_result.data[0]
+        
+        # Check if reservation is in the future
+        try:
+            booking_date = datetime.strptime(reservation['booking_date'], "%Y-%m-%d").date()
+            current_date = datetime.now().date()
+            
+            if booking_date < current_date:
+                return {
+                    "success": False,
+                    "message": f"Reservation ID {reservation_id} is for {booking_date.strftime('%B %d, %Y')}, which has already passed. Past reservations cannot be canceled."
+                }
+        except:
+            pass  # If date parsing fails, proceed with cancellation
+        
+        # Get customer name for personalized message
+        customer_result = supabase.table('customers').select('name').eq('phone_number', phone_number).execute()
+        customer_name = customer_result.data[0].get('name') if customer_result.data else "there"
+        
+        # Delete the reservation
+        delete_result = supabase.table('reservations').delete().eq('id', reservation_id).execute()
+        
+        if delete_result.data or delete_result.status_code == 204:
+            # Format the canceled reservation details
+            booking_time = reservation.get('booking_time', 'No time specified')
+            if booking_time and ':' in str(booking_time):
+                try:
+                    time_obj = datetime.strptime(str(booking_time), "%H:%M").time()
+                    display_time = time_obj.strftime("%I:%M %p")
+                except:
+                    display_time = str(booking_time)
+            else:
+                display_time = str(booking_time)
+            
+            try:
+                display_date = datetime.strptime(reservation['booking_date'], "%Y-%m-%d").strftime("%B %d, %Y")
+            except:
+                display_date = reservation['booking_date']
+            
+            return {
+                "success": True,
+                "action": "reservation_canceled",
+                "canceled_reservation": {
+                    "reservation_id": reservation_id,
+                    "customer_name": customer_name,
+                    "date": display_date,
+                    "time": display_time,
+                    "pax": reservation['pax']
+                },
+                "summary": f"Successfully canceled reservation {reservation_id} for {customer_name} on {display_date} at {display_time} for {reservation['pax']} people. The cancellation is complete."
+            }
+        else:
+            return {
+                "success": False,
+                "message": f"There was an issue canceling reservation ID {reservation_id}. Please try again or contact us directly."
+            }
+        
+    except Exception as e:
+        print(f"[DEBUG] Error in cancel_reservation: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "message": f"I encountered an error while canceling your reservation: {str(e)}"
+        }
+
+@tool
+def modify_reservation(config: RunnableConfig, reservation_id: int = None, phone_number: str = None, new_date: str = None, new_time: str = None, new_pax: int = None) -> Dict[str, Any]:
+    """
+    Modify an existing reservation. Requires phone number verification.
+    
+    Args:
+        reservation_id: The reservation ID to modify
+        phone_number: User's phone number for verification
+        new_date: New date in YYYY-MM-DD format (optional)
+        new_time: New time in HH:MM format (optional)
+        new_pax: New number of people (optional)
+        
+    Returns:
+        Dict with modification status and details
+    """
+    from datetime import datetime
+    print(f"[DEBUG] modify_reservation called with reservation_id: {reservation_id}, phone_number: '{phone_number}', new_date: '{new_date}', new_time: '{new_time}', new_pax: {new_pax}")
+    
+    configuration = config.get("configurable", {})
+    if not phone_number:
+        phone_number = configuration.get("phone_number", None)
+    
+    # Try thread cache if still no phone number
+    if not phone_number:
+        phone_number = get_thread_phone_number(config)
+        print(f"[DEBUG] modify_reservation using thread cache phone_number: '{phone_number}'")
+    
+    if not reservation_id:
+        return {
+            "success": False,
+            "message": "To modify a reservation, I need the reservation ID. Which reservation would you like to modify?"
+        }
+    
+    if not phone_number or len(phone_number) != 10:
+        return {
+            "success": False,
+            "message": "To modify a reservation, I need to verify your phone number. What's your 10-digit phone number?"
+        }
+    
+    try:
+        # Get the reservation and verify ownership
+        reservation_result = supabase.table('reservations').select('*').eq('id', reservation_id).eq('cust_number', phone_number).execute()
+        
+        if not reservation_result.data:
+            return {
+                "success": False,
+                "message": f"I couldn't find reservation ID {reservation_id} for your phone number. Please check the reservation ID and try again."
+            }
+        
+        current_reservation = reservation_result.data[0]
+        
+        # Check if reservation is in the future
+        try:
+            booking_date = datetime.strptime(current_reservation['booking_date'], "%Y-%m-%d").date()
+            current_date = datetime.now().date()
+            
+            if booking_date < current_date:
+                return {
+                    "success": False,
+                    "message": f"Reservation ID {reservation_id} is for {booking_date.strftime('%B %d, %Y')}, which has already passed. Past reservations cannot be modified."
+                }
+        except:
+            pass  # If date parsing fails, proceed with modification
+        
+        # If no modifications provided, ask what they want to change
+        if not new_date and not new_time and not new_pax:
+            try:
+                current_date_display = datetime.strptime(current_reservation['booking_date'], "%Y-%m-%d").strftime("%B %d, %Y")
+            except:
+                current_date_display = current_reservation['booking_date']
+            
+            current_time = current_reservation.get('booking_time', 'No time')
+            if current_time and ':' in str(current_time):
+                try:
+                    time_obj = datetime.strptime(str(current_time), "%H:%M").time()
+                    current_time_display = time_obj.strftime("%I:%M %p")
+                except:
+                    current_time_display = str(current_time)
+            else:
+                current_time_display = str(current_time)
+            
+            return {
+                "success": False,
+                "step": "modification_details",
+                "current_reservation": {
+                    "reservation_id": reservation_id,
+                    "date": current_date_display,
+                    "time": current_time_display,
+                    "pax": current_reservation['pax']
+                },
+                "message": f"**Current Reservation Details:**\n• **ID:** {reservation_id}\n• **Date:** {current_date_display}\n• **Time:** {current_time_display}\n• **Party Size:** {current_reservation['pax']} people\n\nWhat would you like to change? You can modify the date (YYYY-MM-DD), time (HH:MM), or number of people."
+            }
+        
+        # Validate new values if provided
+        updates = {}
+        
+        if new_date:
+            try:
+                new_date_obj = datetime.strptime(new_date, "%Y-%m-%d").date()
+                today = datetime.now().date()
+                
+                if new_date_obj < today:
+                    return {
+                        "success": False,
+                        "message": "Please select a future date for your reservation."
+                    }
+                
+                updates['booking_date'] = new_date
+            except ValueError:
+                return {
+                    "success": False,
+                    "message": "Please provide the date in YYYY-MM-DD format (e.g., 2025-07-15)."
+                }
+        
+        if new_time:
+            try:
+                new_time_obj = datetime.strptime(new_time, "%H:%M").time()
+                
+                # Check restaurant hours
+                open_time = datetime.strptime("11:00", "%H:%M").time()
+                last_seating = datetime.strptime("22:00", "%H:%M").time()
+                
+                if new_time_obj < open_time or new_time_obj > last_seating:
+                    return {
+                        "success": False,
+                        "message": "We accept reservations between 11:00 AM and 10:00 PM. Please choose a time within our operating hours."
+                    }
+                
+                updates['booking_time'] = new_time
+            except ValueError:
+                return {
+                    "success": False,
+                    "message": "Please provide the time in HH:MM format (e.g., 19:30 for 7:30 PM)."
+                }
+        
+        if new_pax:
+            if new_pax < 1 or new_pax > 12:
+                return {
+                    "success": False,
+                    "message": "We can accommodate 1-12 people per reservation. Please choose a number within this range."
+                }
+            
+            updates['pax'] = new_pax
+        
+        # Update the reservation
+        if updates:
+            update_result = supabase.table('reservations').update(updates).eq('id', reservation_id).execute()
+            
+            if update_result.data:
+                updated_reservation = update_result.data[0]
+                
+                # Get customer name
+                customer_result = supabase.table('customers').select('name').eq('phone_number', phone_number).execute()
+                customer_name = customer_result.data[0].get('name') if customer_result.data else "there"
+                
+                # Format the updated details
+                try:
+                    display_date = datetime.strptime(updated_reservation['booking_date'], "%Y-%m-%d").strftime("%B %d, %Y")
+                except:
+                    display_date = updated_reservation['booking_date']
+                
+                booking_time = updated_reservation.get('booking_time', 'No time')
+                if booking_time and ':' in str(booking_time):
+                    try:
+                        time_obj = datetime.strptime(str(booking_time), "%H:%M").time()
+                        display_time = time_obj.strftime("%I:%M %p")
+                    except:
+                        display_time = str(booking_time)
+                else:
+                    display_time = str(booking_time)
+                
+                return {
+                    "success": True,
+                    "action": "reservation_updated",
+                    "updated_reservation": {
+                        "reservation_id": reservation_id,
+                        "customer_name": customer_name,
+                        "date": display_date,
+                        "time": display_time,
+                        "pax": updated_reservation['pax']
+                    },
+                    "summary": f"Successfully updated reservation {reservation_id} for {customer_name}. New details: {display_date} at {display_time} for {updated_reservation['pax']} people."
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": f"There was an issue updating reservation ID {reservation_id}. Please try again or contact us directly."
+                }
+        else:
+            return {
+                "success": False,
+                "message": "No changes were specified. What would you like to modify about your reservation?"
+            }
+        
+    except Exception as e:
+        print(f"[DEBUG] Error in modify_reservation: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "message": f"I encountered an error while modifying your reservation: {str(e)}"
+        }
+
+@tool  
+def parse_reservation_conflict_response(user_response: str) -> Dict[str, Any]:
+    """
+    Parse user's response to a reservation conflict and extract their choice.
+    
+    Args:
+        user_response: User's response to conflict options
+        
+    Returns:
+        Dict with parsed conflict resolution choice
+    """
+    response_lower = user_response.lower().strip()
+    
+    # Check for numeric choices
+    if '1' in response_lower:
+        if 'update' in response_lower or 'change' in response_lower:
+            return {"conflict_resolution": "update_existing", "choice_number": 1}
+        elif 'yes' in response_lower or 'create' in response_lower or 'both' in response_lower:
+            return {"conflict_resolution": "proceed", "choice_number": 1}
+        else:
+            return {"conflict_resolution": "update_existing", "choice_number": 1}
+    
+    elif '2' in response_lower:
+        return {"conflict_resolution": "keep", "choice_number": 2}
+    
+    elif '3' in response_lower:
+        if 'update' in response_lower or 'modify' in response_lower:
+            return {"conflict_resolution": "update", "choice_number": 3}
+        else:
+            return {"conflict_resolution": "cancel_and_create", "choice_number": 3}
+    
+    # Check for word-based responses
+    elif any(word in response_lower for word in ['update', 'change', 'modify']):
+        return {"conflict_resolution": "update_existing", "choice_text": "update"}
+    
+    elif any(word in response_lower for word in ['keep', 'stay', 'existing', 'current']):
+        return {"conflict_resolution": "keep", "choice_text": "keep"}
+    
+    elif any(word in response_lower for word in ['cancel', 'delete', 'remove']):
+        return {"conflict_resolution": "cancel_and_create", "choice_text": "cancel"}
+    
+    elif any(word in response_lower for word in ['yes', 'proceed', 'both', 'create', 'new']):
+        return {"conflict_resolution": "proceed", "choice_text": "proceed"}
+    
+    elif any(word in response_lower for word in ['no', 'cancel', 'stop']):
+        return {"conflict_resolution": "keep", "choice_text": "no"}
+    
+    else:
+        return {
+            "conflict_resolution": None, 
+            "error": "Could not understand the choice. Please respond with 1, 2, or 3, or use words like 'update', 'keep', 'cancel', 'yes', or 'no'."
+        }
+
+# Define waiter agent tools after all tools are created
+waiter_agent_tools = [extract_food_terms, check_semantic_similarity, get_recommendations, get_detailed_dish_info, get_faq_answer, debug_embedding_indexes, check_user_registration, collect_registration, make_reservation, get_reservations, cancel_reservation, modify_reservation, parse_reservation_conflict_response]
+waiter_agent_runnable = waiter_agent_prompt | llm.bind_tools(waiter_agent_tools)
+
+# Only run the command line interface if this script is executed directly
+if __name__ == "__main__":
+    run_command_line_interface()
+
+
 
 

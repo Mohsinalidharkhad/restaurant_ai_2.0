@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Neemsi Restaurant Assistant Launcher
+My Restaurant Assistant Launcher
 
 Simple script to launch either the Streamlit UI or command line interface.
 """
