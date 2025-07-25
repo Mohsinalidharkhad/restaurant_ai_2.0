@@ -115,22 +115,23 @@ def run_background_initialization():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize the system on startup with Phase 1 optimizations"""
-    global system_initialized, initialization_result, initialization_thread
+    """Application lifespan manager - handles startup and shutdown"""
+    global system_initialized, initialization_result, initialization_in_progress, initialization_start_time, initialization_thread
     
-    print("🚀 Starting FastAPI backend bridge...")
-    print("⚡ Starting enhanced background system initialization (Phase 1) for optimal UX...")
+    print("🚀 Starting Restaurant Assistant Backend API...")
+    print("📡 This API bridges the Next.js frontend with the Python LangGraph backend")
+    print("🌐 Frontend should be running on http://localhost:3000")
+    print("🔧 API will be available on http://localhost:8000")
+    print("-" * 60)
     
-    # Start enhanced initialization in background thread immediately
+    # Start background initialization immediately
+    print("🔄 Starting background system initialization...")
     initialization_thread = threading.Thread(target=run_background_initialization, daemon=True)
     initialization_thread.start()
     
-    print("✅ FastAPI backend started! Enhanced initialization running in background...")
-    print("💡 Pre-warming connections, models, and common queries for instant responses...")
-    
     yield
     
-    print("🛑 Shutting down FastAPI backend bridge...")
+    print("🛑 Shutting down Restaurant Assistant Backend API...")
 
 # Create FastAPI app
 app = FastAPI(
@@ -155,14 +156,18 @@ app.add_middleware(
 
 @app.get("/")
 async def root():
-    """Health check endpoint"""
+    """Health check endpoint - responds immediately for Railway healthchecks"""
     global initialization_start_time
     
+    # Always return a basic response for Railway healthchecks
+    # This prevents deployment failures due to slow initialization
     status_info = {
         "message": "Restaurant Assistant Backend API",
-        "status": "running",
+        "status": "starting",  # Changed from "running" to "starting"
         "system_initialized": system_initialized,
-        "initialization_in_progress": initialization_in_progress
+        "initialization_in_progress": initialization_in_progress,
+        "ready": system_initialized,  # Add explicit ready flag
+        "timestamp": time.time()
     }
     
     # Add progress info if initialization is running
@@ -171,9 +176,11 @@ async def root():
         status_info["initialization_elapsed_seconds"] = round(elapsed, 1)
         status_info["initialization_status"] = "initializing..."
     elif system_initialized:
+        status_info["status"] = "running"
         status_info["initialization_status"] = "completed"
+        status_info["ready"] = True
     else:
-        status_info["initialization_status"] = "failed" if initialization_result else "not_started"
+        status_info["initialization_status"] = "not_started" if not initialization_result else "failed"
     
     return status_info
 
@@ -527,6 +534,15 @@ async def health_check():
         "timestamp": time.time()
     }
 
+@app.get("/health")
+async def simple_health_check():
+    """Simple health check for Railway - responds immediately"""
+    return {
+        "status": "ok",
+        "service": "restaurant-assistant-api",
+        "timestamp": time.time()
+    }
+
 if __name__ == "__main__":
     print("🚀 Starting Restaurant Assistant Backend API...")
     print("📡 This API bridges the Next.js frontend with the Python LangGraph backend")
@@ -534,10 +550,16 @@ if __name__ == "__main__":
     print("🔧 API will be available on http://localhost:8000")
     print("-" * 60)
     
+    # Log environment variables for debugging (without sensitive data)
+    port = os.getenv("PORT", "8000")
+    print(f"🔧 Using port: {port}")
+    print(f"🔧 Environment: {os.getenv('RAILWAY_ENVIRONMENT', 'development')}")
+    print(f"🔧 Python version: {sys.version}")
+    
     uvicorn.run(
         "backend_api:app",
         host="0.0.0.0",
-        port=8000,
+        port=int(port),
         reload=False,
         log_level="info"
     ) 
