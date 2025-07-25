@@ -98,20 +98,17 @@ def run_background_initialization():
         
         if system_initialized:
             cached_queries = initialization_result.get("cached_queries", 0)
-            print(f"✅ Enhanced background initialization completed in {elapsed_time:.2f}s!")
-            print(f"💡 {cached_queries} queries pre-warmed for instant responses")
-            print(f"⚡ Expected performance: Cold start < 2s, Warm start < 1s")
+            print(f"✅ System initialized successfully in {elapsed_time:.3f}s with {cached_queries} cached queries")
         else:
-            print(f"❌ Background initialization failed after {elapsed_time:.2f}s: {initialization_result.get('error', 'Unknown error')}")
+            error_msg = initialization_result.get("error", "Unknown error")
+            print(f"❌ System initialization failed after {elapsed_time:.3f}s: {error_msg}")
             
     except Exception as e:
-        print(f"❌ Background initialization exception: {e}")
-        import traceback
-        traceback.print_exc()
-        
-        system_initialized = False
         initialization_in_progress = False
         initialization_result = {"success": False, "error": str(e)}
+        print(f"❌ Background initialization failed: {e}")
+        import traceback
+        traceback.print_exc()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
