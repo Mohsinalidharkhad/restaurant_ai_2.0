@@ -1,293 +1,244 @@
-# 🍽️ Restaurant Graph Agent
+# Restaurant Graph Agent
 
-An intelligent restaurant assistant powered by AI, built with LangGraph, Neo4j, and OpenAI. This system provides personalized menu recommendations, ingredient information, and dietary assistance through natural language conversations.
+An AI-powered restaurant assistant that combines advanced menu knowledge with intelligent reservation management. This application uses LangGraph for agent orchestration, Neo4j for menu knowledge graphs, and Supabase for customer data, with a modern Next.js frontend.
 
-## 🌟 Features
-
-- **🤖 Single Agent Architecture**: Intelligent waiter agent handles both menu assistance and customer registration when needed
-- **🔍 Semantic Search**: Vector embeddings and graph-based search for intelligent menu recommendations
-- **📊 Knowledge Graph**: Neo4j-powered menu database with relationships between dishes, ingredients, categories, and cuisines
-- **👤 Customer Management**: Supabase-backed user profiles with preferences and dietary restrictions
-- **🌐 Multiple Interfaces**: Beautiful Streamlit web UI and command-line interface
-- **📈 Evaluation System**: LangSmith integration for automated quality assessment
-- **🥗 Dietary Intelligence**: Handles vegetarian, vegan, spice preferences, and allergen information
-
-## 🏗️ Architecture
+## 🏗️ Project Structure
 
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Streamlit UI  │    │  Command Line   │    │   Evaluation    │
-│   (Web App)     │    │   Interface     │    │   (LangSmith)   │
-└─────────┬───────┘    └─────────┬───────┘    └─────────┬───────┘
-          │                      │                      │
-          └──────────────────────┼──────────────────────┘
-                                 │
-                    ┌─────────────▼──────────────┐
-                    │       LangGraph Core       │
-                    │    (Single Waiter Agent)   │
-                    └─────────────┬──────────────┘
-                                 │
-          ┌──────────────────────┼──────────────────────┐
-          │                      │                      │
-    ┌─────▼─────┐        ┌───────▼────────┐    ┌───────▼────────┐
-    │  Neo4j    │        │    OpenAI      │    │   Supabase     │
-    │(Menu KB)  │        │ (LLM + Embed)  │    │ (Customer DB)  │
-    └───────────┘        └────────────────┘    └────────────────┘
+restaurant-graph-agent/
+├── 📱 frontend/                  # Frontend Application (Next.js + React)
+│   ├── app/                      # Next.js 13+ App Router
+│   │   ├── api/                  # API route handlers
+│   │   ├── page.tsx              # Main application page
+│   │   ├── layout.tsx            # Root layout component
+│   │   └── globals.css           # Global styles
+│   ├── src/                      # Organized source code
+│   │   ├── components/           # React components (chat, layout, ui)
+│   │   ├── lib/                  # Utilities and helper functions
+│   │   ├── types/                # TypeScript definitions
+│   │   ├── constants/            # Application constants
+│   │   ├── hooks/                # Custom React hooks
+│   │   └── styles/               # Additional stylesheets
+│   ├── package.json              # Frontend dependencies
+│   ├── tsconfig.json             # TypeScript configuration
+│   ├── tailwind.config.js        # Tailwind CSS configuration
+│   └── next.config.js            # Next.js configuration
+│
+├── 🧠 backend/                   # Backend Logic (Python + LangGraph)
+│   ├── services/                 # Core backend services
+│   │   ├── main.py               # Core LangGraph application
+│   │   └── backend_api.py        # FastAPI bridge server
+│   ├── tools/                    # Agent tool functions
+│   │   ├── search_tools.py       # AI-powered search and debugging
+│   │   ├── menu_tools.py         # Menu recommendations and details
+│   │   ├── customer_tools.py     # Customer registration and management
+│   │   ├── reservation_tools.py  # Reservation management
+│   │   └── faq_tools.py          # FAQ search and responses
+│   ├── data/                     # Database connections and clients
+│   │   ├── connections.py        # Global connection pooling
+│   │   ├── neo4j_client.py       # Neo4j knowledge graph client
+│   │   ├── openai_client.py      # OpenAI embedding client
+│   │   └── supabase_client.py    # Supabase customer data client
+│   ├── core/                     # Core application logic
+│   ├── agents/                   # LangGraph agent definitions
+│   └── utils/                    # Backend utilities
+│
+├── 📊 config/                    # Configuration files
+├── 📜 scripts/                   # Utility scripts
+├── 🧪 evaluation/                # Testing and evaluation
+├── 📖 docs/                      # Documentation
+│
+├── 🧠 backend/                   # Backend Logic (Python + LangGraph)
+│   ├── services/                 # Core backend services
+│   │   ├── main.py               # Core LangGraph application
+│   │   └── backend_api.py        # FastAPI bridge server  
+├── 📋 requirements.txt           # Python dependencies
+└── 📖 README.md                  # This file
 ```
+
+## ✨ Key Features
+
+### 🤖 **Intelligent Agent System**
+- **Single Waiter Agent** powered by LangGraph for natural conversation flow
+- **13 Specialized Tools** for menu search, reservations, customer management, and FAQ
+- **Context-aware responses** with memory across conversation threads
+- **Tool-based architecture** for extensible functionality
+
+### 🗃️ **Advanced Knowledge Management**
+- **Neo4j Knowledge Graph** storing 1000+ menu items with detailed relationships
+- **Vector embeddings** for semantic search and recommendations  
+- **Dynamic schema introspection** for intelligent query generation
+- **FAQ database** with 15+ common restaurant questions
+
+### 📅 **Smart Reservation System**
+- **Real-time availability checking** with conflict resolution
+- **Customer phone verification** with registration management
+- **Reservation modification and cancellation** with business rule validation
+- **Supabase integration** for reliable customer data storage
+
+### 🎨 **Modern Frontend**
+- **Next.js 13+ with App Router** for optimal performance
+- **Real-time chat interface** with typing indicators and smooth animations
+- **Responsive design** optimized for desktop and mobile
+- **Professional UI components** built with Tailwind CSS and Radix UI
 
 ## 🚀 Quick Start
 
 ### Prerequisites
+- **Python 3.8+** with pip
+- **Node.js 18+** with npm
+- **Neo4j database** (local or cloud)
+- **Supabase account** (free tier available)
+- **OpenAI API key** for embeddings and chat
 
-- Python 3.8+
-- Neo4j Database (local or cloud)
-- OpenAI API Key
-- Supabase Account
-- LangSmith Account (for evaluation)
+### Environment Setup
+1. **Clone the repository**
+   ```bash
+   git clone <repository-url>
+   cd restaurant-graph-agent
+   ```
 
-### 1. Installation
+2. **Create environment file**
+   ```bash
+   cp .env.example .env
+   # Fill in your API keys and database credentials
+   ```
 
+3. **Install Python dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. **Install frontend dependencies**
+   ```bash
+   cd frontend && npm install && cd ..
+   ```
+
+5. **Start the application**
+   ```bash
+   python scripts/development/run_next_app.py
+   ```
+
+The application will be available at:
+- **Frontend**: http://localhost:3000
+- **Backend API**: http://localhost:8000
+
+## 🛠️ Technical Architecture
+
+### Frontend Stack
+- **Next.js 13+** - React framework with App Router
+- **TypeScript** - Type safety and developer experience
+- **Tailwind CSS** - Utility-first styling framework
+- **Radix UI** - Accessible component primitives
+- **Lucide Icons** - Modern icon library
+
+### Backend Stack
+- **LangGraph** - Agent orchestration and workflow management
+- **FastAPI** - High-performance API bridge
+- **LangChain** - LLM integration and tool management
+- **OpenAI GPT-4** - Language model and embeddings
+
+### Data Layer
+- **Neo4j** - Graph database for menu knowledge
+- **Supabase** - Customer data and reservations
+- **Vector Search** - Semantic similarity matching
+- **Connection Pooling** - Optimized database performance
+
+## 📊 Performance & Reliability
+
+### System Capabilities
+- **Sub-second response times** for menu queries
+- **Concurrent user support** with connection pooling
+- **Fault-tolerant design** with graceful error handling
+- **Automatic system initialization** with health monitoring
+
+### Data Features
+- **1000+ menu items** with rich metadata and relationships
+- **Vector embeddings** for intelligent recommendations
+- **Real-time reservation availability** with conflict resolution
+- **Customer history tracking** with privacy protection
+
+## 🔧 Configuration
+
+### Environment Variables
 ```bash
-git clone <repository-url>
-cd restaurant-graph-agent
-pip install -r requirements.txt
-```
-
-### 2. Environment Setup
-
-Create a `.env` file with the following variables:
-
-```env
 # OpenAI Configuration
 OPENAI_API_KEY=your_openai_api_key
 
-# Neo4j Configuration
+# Neo4j Database
 NEO4J_URI=bolt://localhost:7687
-NEO4J_USER=neo4j
+NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=your_neo4j_password
 
-# Supabase Configuration
-SUPABASE_URL=https://your-project.supabase.co
+# Supabase
+SUPABASE_URL=your_supabase_url
 SUPABASE_KEY=your_supabase_anon_key
 
-# LangSmith Configuration (for evaluation)
-LANGSMITH_API_KEY=your_langsmith_api_key
+# LangSmith (Optional - for debugging)
+LANGCHAIN_API_KEY=your_langsmith_key
 LANGCHAIN_TRACING_V2=true
-LANGCHAIN_PROJECT=restaurant-chatbot
 ```
 
-### 3. Database Setup
+### System Requirements
+- **Memory**: 4GB RAM minimum, 8GB recommended
+- **Storage**: 2GB available space
+- **Network**: Internet connection for API services
+- **Ports**: 3000 (frontend), 8000 (backend), 7687 (Neo4j)
 
-#### Step 1: Neo4j Schema Setup
+## 🧪 Development & Testing
 
-1. Open your Neo4j browser interface
-2. Run the schema creation queries from `data_injestion.md` to create constraints and indexes
-
-#### Step 2: Menu Data Upload
-
-1. Create a Google Sheets menu following the format: [Sample Menu](https://drive.google.com/file/d/1M1PRw6jb39JPB-Z0F6ABunzhfaidaeP4/view?usp=sharing)
-2. Make the sheet publicly accessible
-3. Replace the Google Sheets ID in the Cypher query from `data_injestion.md`
-4. Run the data upload query in Neo4j
-
-#### Step 3: Generate Embeddings
-
+### Development Workflow
 ```bash
-python embed.py
+# Backend development
+python backend/services/main.py  # Direct LangGraph testing
+
+# Frontend development  
+cd frontend && npm run dev
+
+# Full stack development
+python scripts/development/run_next_app.py  # Both services with live logs
 ```
 
-This will:
-- Generate OpenAI embeddings for all menu items
-- Create vector indexes for semantic search
-- Tag searchable nodes
+### Code Organization
+- **Frontend**: All UI code organized in `frontend/` with clear component structure
+- **Backend**: All Python code organized in `backend/` with domain-specific modules
+- **Tools**: Each tool type (search, menu, customer, reservation, FAQ) in separate modules
+- **Configuration**: All config files properly organized by purpose
 
-### 4. Run the Application
+## 📚 Documentation
 
-#### Option A: Streamlit Web Interface (Recommended)
-
-```bash
-python run_app.py
-```
-
-Select option 1 for the web interface. The app will launch at `http://localhost:8501`
-
-#### Option B: Command Line Interface
-
-```bash
-python run_app.py
-```
-
-Select option 2 for the terminal-based chat interface.
-
-## 📋 Usage Workflow
-
-### Customer Journey
-
-1. **Registration Phase**
-   - Provide 10-digit phone number
-   - Share name and preferences (dietary, spice level, cuisine)
-   - Set allergen information
-
-2. **Menu Assistance Phase**
-   - Ask about dishes, ingredients, categories
-   - Get personalized recommendations
-   - Inquire about allergens and dietary restrictions
-   - Request preparation details and pricing
-
-### Sample Conversations
-
-```
-User: 8691990606
-Bot: Thank you! What's your name?
-
-User: John
-Bot: Nice to meet you, John! Would you like to set your food preferences?
-
-User: I prefer vegetarian North Indian food with medium spice
-Bot: Perfect! I've saved your preferences. How can I help you with our menu today?
-
-User: Do you have any paneer dishes?
-Bot: Yes! We have several delicious paneer options: Paneer Tikka, Paneer Makhani, Palak Paneer...
-```
-
-## 🔧 Technical Details
-
-### Core Components
-
-- **`main.py`**: LangGraph application with single agent architecture
-- **`embed.py`**: Vector embedding generation for semantic search
-- **`streamlit_app.py`**: Modern web interface with real-time chat
-- **`run_app.py`**: Application launcher with port management
-- **`eval.py`**: Automated evaluation using LangSmith
-
-### Agent Architecture
-
-**Waiter Agent**
-   - Processes menu queries using Neo4j knowledge graph
-   - Provides semantic search capabilities
-   - Offers personalized recommendations
-   - Handles customer registration when needed for orders/reservations
-   - Manages Supabase customer records
-
-### Search Capabilities
-
-- **Symbolic Search**: Cypher queries for exact matches and relationships
-- **Semantic Search**: Vector similarity for fuzzy matching and recommendations
-- **Hybrid Approach**: Combines both methods for comprehensive results
-
-## 📊 Evaluation
-
-### Running Evaluations
-
-```bash
-python eval.py
-```
-
-The evaluation system:
-- Uses predefined question datasets in LangSmith
-- Tests helpfulness, correctness, completeness, and overall quality
-- Provides detailed scoring and insights
-- Simulates complete user registration and interaction flows
-
-### Evaluation Metrics
-
-- **Helpfulness** (0.0-1.0): How well the response addresses the customer's question
-- **Correctness** (0.0-1.0): Accuracy of information compared to reference answers
-- **Completeness** (0.0-1.0): Comprehensiveness of the response
-- **Overall Quality** (0.0-1.0): Holistic assessment of the interaction
-
-## 🗂️ File Structure
-
-```
-restaurant-graph-agent/
-├── README.md                 # This file
-├── requirements.txt          # Python dependencies
-├── .env                      # Environment configuration
-├── data_injestion.md        # Neo4j setup instructions
-├── main.py                  # Core LangGraph application
-├── embed.py                 # Embedding generation script
-├── run_app.py               # Application launcher
-├── streamlit_app.py         # Web interface
-├── eval.py                  # Evaluation system
-└── workflow_graph.png       # Architecture diagram
-```
-
-## 🛠️ Configuration
-
-### Neo4j Schema
-
-The knowledge graph includes:
-- **Dishes**: Menu items with descriptions, prices, preparation time
-- **Ingredients**: Components of each dish
-- **Categories**: Appetizers, main courses, desserts, etc.
-- **Cuisines**: North Indian, South Indian, Chinese, etc.
-- **Allergens**: Nuts, gluten, dairy, etc.
-- **Diet Types**: Vegetarian, vegan, non-vegetarian
-
-### Relationships
-
-- `CONTAINS`: Dish → Ingredient
-- `IN_CATEGORY`: Dish → Category  
-- `OF_CUISINE`: Dish → Cuisine
-- `HAS_ALLERGEN`: Dish → Allergen
-- `HAS_DIET_TYPE`: Dish → DietType
-
-## 🚦 Troubleshooting
-
-### Common Issues
-
-1. **Neo4j Connection Failed**
-   - Verify Neo4j is running
-   - Check connection credentials in `.env`
-   - Ensure firewall allows port 7687
-
-2. **Embeddings Not Generated**
-   - Verify OpenAI API key
-   - Check Neo4j data upload completion
-   - Run `embed.py` manually
-
-3. **Streamlit Port Issues**
-   - Run `python run_app.py` and select option 1
-   - The launcher automatically handles port conflicts
-
-4. **Evaluation Failures**
-   - Ensure LangSmith API key is set
-   - Verify dataset "Test base" exists in LangSmith
-   - Check that main chatbot is working correctly
-
-### Debug Mode
-
-Enable debug logging by setting environment variables:
-```bash
-export LANGCHAIN_TRACING_V2=true
-export LANGCHAIN_VERBOSE=true
-```
-
-## 🔮 Future Enhancements
-
-- Order management and checkout functionality
-- Multi-language support
-- Voice interface integration
-- Real-time inventory tracking
-- Advanced recommendation algorithms
-- Integration with POS systems
+- **Frontend README**: `frontend/README.md` - Detailed frontend development guide
+- **Component Documentation**: `frontend/src/components/` - Individual component docs
+- **Backend API**: `backend_api.py` - FastAPI interactive docs at `/docs`
+- **Tool Documentation**: `backend/tools/` - Individual tool module documentation
 
 ## 🤝 Contributing
 
-1. Fork the repository
-2. Create a feature branch
-3. Implement your changes
-4. Add tests and documentation
-5. Submit a pull request
+This codebase is designed for maintainability and extensibility:
 
-## 📄 License
+1. **Frontend**: Follow the established component patterns in `frontend/src/components/`
+2. **Backend**: Add new tools in `backend/tools/` following the `@tool` decorator pattern
+3. **Types**: Add TypeScript types in `frontend/src/types/` for frontend, Python types in backend modules
+4. **Testing**: Use the evaluation framework in `evaluation/` for testing changes
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+## 🔍 Troubleshooting
+
+### Common Issues
+- **Port conflicts**: The launcher automatically handles port conflicts
+- **Database connections**: Check environment variables and network access  
+- **Missing dependencies**: Run `pip install -r requirements.txt` and `cd frontend && npm install`
+- **Performance**: Monitor the evaluation metrics and optimize based on bottlenecks
+
+### Debug Mode
+```bash
+# Enable detailed logging
+export LANGCHAIN_TRACING_V2=true
+python scripts/development/run_next_app.py
+```
 
 ## 📞 Support
 
-For questions or support, please create an issue in the repository or contact the development team.
-
----
-
-**Built with ❤️ using LangGraph, Neo4j, and OpenAI** 
+For technical issues or questions about this restaurant agent system, please check:
+1. The troubleshooting section above
+2. Component-specific READMEs in their directories
+3. The evaluation framework for testing tools and changes 
