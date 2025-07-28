@@ -5,7 +5,7 @@
     "buildCommand": "cd backend && pip install -r requirements_minimal.txt"
   },
   "deploy": {
-    "startCommand": "cd backend && python working_api.py",
+    "startCommand": "cd backend && python simple_test.py",
     "healthcheckPath": "/health",
     "healthcheckTimeout": 60,
     "restartPolicyType": "ON_FAILURE",
